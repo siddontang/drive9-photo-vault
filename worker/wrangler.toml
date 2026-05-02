@@ -4,3 +4,6 @@ compatibility_date = "2026-04-01"
 
 [vars]
 DRIVE9_SERVER = "https://api.drive9.ai"
+
+[ai]
+binding = "AI"

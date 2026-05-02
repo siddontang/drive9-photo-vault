@@ -1,6 +1,7 @@
 export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
+  AI?: { run: (model: string, input: unknown) => Promise<any> };
 }
 
 type Photo = {
@@ -20,6 +21,10 @@ type Photo = {
   updatedAt: string;
   width?: number;
   height?: number;
+  aiCaption?: string;
+  aiText?: string;
+  aiObjects?: string[];
+  searchText?: string;
 };
 
 const INDEX_PATH = '/photovault/index.json';
@@ -80,10 +85,51 @@ async function setIndex(env: Env, photos: Photo[]) {
 }
 function scorePhoto(photo: Photo, q: string) {
   if (!q) return 1;
-  const hay = [photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner].join(' ').toLowerCase();
+  const hay = [photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner, photo.aiCaption || '', photo.aiText || '', (photo.aiObjects || []).join(' '), photo.searchText || ''].join(' ').toLowerCase();
   const words = tokenize(q);
   if (!words.length) return 1;
   return words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0) / words.length;
+}
+
+
+function cleanWords(words: unknown): string[] {
+  if (!Array.isArray(words)) return [];
+  return [...new Set(words.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+}
+function parseJsonLoose(text: string): any | null {
+  try { return JSON.parse(text); } catch {}
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch { return null; }
+}
+async function analyzeImage(env: Env, buf: ArrayBuffer, existingTags: string[]) {
+  const fallback = {
+    caption: 'Uploaded image',
+    text: '',
+    objects: [] as string[],
+    tags: existingTags,
+    searchText: existingTags.join(' '),
+    status: 'fallback',
+  };
+  if (!env.AI) return fallback;
+  try {
+    const bytes = [...new Uint8Array(buf)];
+    const prompt = `Analyze this image for a photo management app. Return ONLY compact JSON with keys: caption (one sentence), text (visible OCR text, empty if none), objects (array of concrete visible things), tags (array of 5-12 short searchable tags). Include company/product names if visible. No markdown.`;
+    const [out, ocrOut] = await Promise.all([
+      env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', { image: bytes, prompt }),
+      env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', { image: bytes, prompt: 'OCR task: transcribe ALL visible text in this image exactly. Include usernames, product names, errors, hashtags, UI labels, and URLs. Return plain text only. If no text is visible, return an empty string.' }),
+    ]);
+    const raw = typeof out === 'string' ? out : (out?.description || out?.response || out?.result || JSON.stringify(out));
+    const ocrRaw = typeof ocrOut === 'string' ? ocrOut : (ocrOut?.description || ocrOut?.response || ocrOut?.result || '');
+    const parsed = parseJsonLoose(raw) || { caption: raw };
+    const caption = String(parsed.caption || '').slice(0, 500);
+    const text = [String(parsed.text || parsed.ocr || ''), String(ocrRaw || '')].filter(Boolean).join('\n').slice(0, 2000);
+    const objects = cleanWords(parsed.objects);
+    const tags = cleanWords([...(existingTags || []), ...(Array.isArray(parsed.tags) ? parsed.tags : []), ...objects, ...tokenize(text).filter((w) => w.length > 2).slice(0, 10)]);
+    return { caption, text, objects, tags, searchText: [caption, text, objects.join(' '), tags.join(' ')].join(' '), status: 'ai' };
+  } catch (e: any) {
+    return { ...fallback, caption: `Uploaded image. AI analysis unavailable: ${String(e?.message || e).slice(0, 120)}`, status: 'error' };
+  }
 }
 
 type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
@@ -203,12 +249,13 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const id = crypto.randomUUID();
       const objectKey = `${ROOT}/photos/${id}.${extFor(file.type)}`;
       const tags = String(form.get('tags') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
+      const analysis = await analyzeImage(env, buf, tags);
       const photo: Photo = {
         id,
         owner: String(form.get('owner') || 'guest'),
         title: String(form.get('title') || file.name.replace(/\.[^.]+$/, '') || 'Untitled photo'),
         note: String(form.get('note') || ''),
-        tags,
+        tags: analysis.tags.length ? analysis.tags : tags,
         album: String(form.get('album') || 'Inbox'),
         mime: file.type,
         size: file.size,
@@ -218,13 +265,17 @@ async function handle(req: Request, env: Env): Promise<Response> {
         archived: false,
         createdAt: now,
         updatedAt: now,
+        aiCaption: analysis.caption,
+        aiText: analysis.text,
+        aiObjects: analysis.objects,
+        searchText: analysis.searchText,
       };
-      await drive9Upload(env, objectKey, buf, file.type, [photo.title, photo.note, photo.album, tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: photo.album });
+      await drive9Upload(env, objectKey, buf, file.type, [photo.title, photo.note, photo.album, photo.aiCaption, photo.aiText, photo.tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: photo.album });
       const photos = await getIndex(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
       photos.unshift(photo);
       await setIndex(env, photos);
-      return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
+      return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9', analysis: { caption: photo.aiCaption, text: photo.aiText, objects: photo.aiObjects } }, { status: 201 });
     }
     const fileMatch = path.match(/^\/api\/photos\/([^/]+)\/file$/);
     if (fileMatch && req.method === 'GET') {

@@ -99,7 +99,7 @@ function App() {
     <section className="uploadCard" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
       <label className="uploadButton picker">
         <Upload size={22} />
-        <span>{busy ? 'Uploading…' : 'Choose photos'}</span>
+        <span>{busy ? 'Uploading & analyzing…' : 'Choose photos'}</span>
         <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
       </label>
       <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? 'Hide options' : 'Add tags / album'}</button>
@@ -126,6 +126,7 @@ function App() {
         <div className="photoInfo">
           <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
           <div className="sub">{p.album} · {fmt(p.size)}</div>
+          {p.aiCaption && <div className="caption">{p.aiCaption}</div>}
           {!!p.tags.length && <div className="miniTags">{p.tags.slice(0, 4).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div>}
           <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
         </div>
