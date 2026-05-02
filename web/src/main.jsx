@@ -76,8 +76,8 @@ function App() {
       <div>
         <div className="eyebrow"><Cloud size={16}/> Drive9-inspired photo workspace</div>
         <h1>Your iPhone photo roll, rebuilt for search-first humans.</h1>
-        <p>Upload images, tag them, favorite the keepers, detect duplicates, and search by context. The backend is a Cloudflare Worker with a real OpenAPI spec; the website is running on Netlify.</p>
-        <div className="actions"><button onClick={() => fileRef.current?.click()}><Upload size={18}/> Upload photos</button><a href={`${API}/openapi.json`} target="_blank">OpenAPI</a></div>
+        <p>Upload images from desktop or phone, tag them, favorite the keepers, detect duplicates, and search by context. Cloudflare Worker exposes the OpenAPI; drive9 stores the actual photo workspace.</p>
+        <div className="actions"><label className="uploadButton" htmlFor="photo-upload"><Upload size={18}/> Upload photos</label><a href={`${API}/openapi.json`} target="_blank">OpenAPI</a></div>
       </div>
       <div className="statGrid">
         <div><Images/><b>{heroStats.photos}</b><span>photos</span></div>
@@ -87,8 +87,8 @@ function App() {
     </section>
 
     <section className="panel upload" onDragOver={e=>e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
-      <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={e => upload(e.target.files)} />
-      <div className="drop"><Camera size={30}/><b>Drop pictures here</b><span>or click Upload. Max 15MB/image for this demo.</span></div>
+      <input id="photo-upload" ref={fileRef} className="fileInput" type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
+      <label className="drop" htmlFor="photo-upload"><Camera size={30}/><b>Tap to choose photos</b><span>Desktop also supports drag & drop. Max 25MB/image.</span></label>
       <div className="fields">
         <input placeholder="Title override (optional)" value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/>
         <input placeholder="Tags: travel, receipt, whiteboard" value={draft.tags} onChange={e=>setDraft({...draft,tags:e.target.value})}/>
