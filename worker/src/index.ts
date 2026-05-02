@@ -39,7 +39,7 @@ const cors = {
 function json(data: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     ...init,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...cors, ...(init.headers || {}) },
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...cors, ...(init.headers || {}) },
   });
 }
 function text(data: string, init: ResponseInit = {}) {
@@ -326,7 +326,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
       const obj = await d9(env, 'GET', photo.objectKey);
       if (!obj.ok) return json({ error: 'drive9 read failed', status: obj.status, detail: await obj.text() }, { status: 502 });
-      return new Response(obj.body, { headers: { ...cors, 'content-type': photo.mime, 'cache-control': 'public, max-age=3600' } });
+      return new Response(obj.body, { headers: { ...cors, 'content-type': photo.mime, 'cache-control': 'public, max-age=31536000, immutable' } });
     }
     const photoMatch = path.match(/^\/api\/photos\/([^/]+)$/);
     if (photoMatch && req.method === 'PATCH') {
