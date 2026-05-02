@@ -39,12 +39,17 @@ function App() {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
     if (tag) params.set('tag', tag);
-    const [p, c] = await Promise.all([
-      fetch(`${API}/api/photos?${params}`).then(r => r.json()),
-      fetch(`${API}/api/collections`).then(r => r.json())
-    ]);
-    setPhotos(p.photos || []);
-    setCollections(c);
+    try {
+      const [p, c] = await Promise.all([
+        fetch(`${API}/api/photos?${params}`, { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
+        fetch(`${API}/api/collections`, { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+      ]);
+      setPhotos(p.photos || []);
+      setCollections(c);
+    } catch (e) {
+      setError(`Could not load photos: ${e.message || e}`);
+      setTimeout(() => load(), 2500);
+    }
   }
 
   useEffect(() => {
@@ -131,7 +136,7 @@ function App() {
 
     <section className="searchCard">
       <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search photos…" /></label>
-      <div className="stats"><b>{totals.photos}</b> photos · <b>{totals.favorites}</b> favorites · <b>{fmt(totals.bytes)}</b></div>
+      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> photos · <b>{totals.favorites}</b> favorites · <b>{fmt(totals.bytes)}</b></div><button className="refresh" onClick={load}>Refresh</button></div>
       <div className="chips">
         <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>All</button>
         {tags.slice(0, 8).map(t => <button key={t.name} className={tag === t.name ? 'active' : ''} onClick={() => setTag(t.name)}>{t.name}</button>)}
