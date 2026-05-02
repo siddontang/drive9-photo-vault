@@ -1,0 +1,6 @@
+name = "drive9-photo-api"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[vars]
+DRIVE9_SERVER = "https://api.drive9.ai"

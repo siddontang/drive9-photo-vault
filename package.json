@@ -1,0 +1,11 @@
+{
+  "name": "drive9-photo-demo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "npm --prefix web run build",
+    "dev:web": "npm --prefix web run dev",
+    "deploy:worker": "npm --prefix worker run deploy",
+    "deploy:web": "npm --prefix web run deploy"
+  }
+}
