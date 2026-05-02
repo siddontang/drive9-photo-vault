@@ -27,9 +27,28 @@ type Photo = {
   analysisStatus?: string;
 };
 
+type PhotoIndexItem = {
+  id: string;
+  owner: string;
+  title: string;
+  album: string;
+  mime: string;
+  size: number;
+  objectKey: string;
+  checksum: string;
+  favorite: boolean;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  tags: string[];
+  aiCaption?: string;
+  analysisStatus?: string;
+};
+
 const INDEX_PATH = '/photovault/index.json.gz';
 const LEGACY_INDEX_PATH = '/photovault/index.json';
 const ROOT = '/photovault';
+const META_ROOT = `${ROOT}/meta`;
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
@@ -86,36 +105,107 @@ async function gunzipText(buf: ArrayBuffer): Promise<string> {
   const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
   return new Response(stream).text();
 }
-async function getIndex(env: Env): Promise<Photo[]> {
+function metaPath(id: string) {
+  return `${META_ROOT}/${id}.json`;
+}
+function photoFromIndexItem(x: PhotoIndexItem | Photo): Photo {
+  return {
+    id: x.id,
+    owner: x.owner,
+    title: x.title,
+    note: (x as Photo).note || '',
+    tags: x.tags || [],
+    album: x.album,
+    mime: x.mime,
+    size: x.size,
+    objectKey: x.objectKey,
+    checksum: x.checksum,
+    favorite: !!x.favorite,
+    archived: !!x.archived,
+    createdAt: x.createdAt,
+    updatedAt: x.updatedAt,
+    aiCaption: x.aiCaption || '',
+    aiText: (x as Photo).aiText || '',
+    aiObjects: (x as Photo).aiObjects || [],
+    searchText: (x as Photo).searchText || [x.title, x.album, (x.tags || []).join(' '), x.aiCaption || ''].join(' '),
+    analysisStatus: x.analysisStatus || (x as Photo).analysisStatus,
+  };
+}
+async function getIndexItems(env: Env): Promise<PhotoIndexItem[]> {
   const res = await d9(env, 'GET', INDEX_PATH);
+  let raw: any[] | null = null;
   if (res.ok) {
     const buf = await res.arrayBuffer();
-    return JSON.parse(await gunzipText(buf));
+    raw = JSON.parse(await gunzipText(buf));
+  } else if (res.status === 404) {
+    raw = await d9ReadJson<any[]>(env, LEGACY_INDEX_PATH, []);
+  } else {
+    throw new Error(`drive9 read ${INDEX_PATH} failed: ${res.status} ${await res.text()}`);
   }
-  if (res.status !== 404) throw new Error(`drive9 read ${INDEX_PATH} failed: ${res.status} ${await res.text()}`);
-  // One-time fallback for older plain JSON index; next write migrates to gzip.
-  return d9ReadJson<Photo[]>(env, LEGACY_INDEX_PATH, []);
+  return (raw || []).map((x) => compactPhotoForIndex(photoFromIndexItem(x)));
 }
-function compactPhotoForIndex(p: Photo): Photo {
-  const caption = (p.aiCaption || '').slice(0, 160);
-  // Keep index tiny. Full drive9 semantic/OCR text stays in drive9 stat metadata, not in index.json.
-  const text = (p.aiText || '').slice(0, 120);
-  const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 8);
+async function getPhotoMeta(env: Env, item: PhotoIndexItem): Promise<Photo> {
+  const res = await d9(env, 'GET', metaPath(item.id));
+  if (res.ok) return compactPhotoMeta(await res.json<Photo>());
+  return photoFromIndexItem(item);
+}
+async function getAllPhotos(env: Env): Promise<Photo[]> {
+  const items = await getIndexItems(env);
+  const out: Photo[] = [];
+  for (const item of items) out.push(await getPhotoMeta(env, item));
+  return out;
+}
+function compactPhotoForIndex(p: Photo): PhotoIndexItem {
+  return {
+    id: p.id,
+    owner: p.owner,
+    title: (p.title || '').slice(0, 120),
+    album: (p.album || 'Inbox').slice(0, 80),
+    mime: p.mime,
+    size: p.size,
+    objectKey: p.objectKey,
+    checksum: p.checksum,
+    favorite: !!p.favorite,
+    archived: !!p.archived,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    tags: [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 6),
+    aiCaption: (p.aiCaption || '').slice(0, 140),
+    analysisStatus: p.analysisStatus,
+  };
+}
+function compactPhotoMeta(p: Photo): Photo {
+  const caption = (p.aiCaption || '').slice(0, 500);
+  const text = (p.aiText || '').slice(0, 2200);
+  const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 24);
   return {
     ...p,
+    title: (p.title || '').slice(0, 160),
+    note: (p.note || '').slice(0, 500),
+    album: (p.album || 'Inbox').slice(0, 80),
     tags,
     aiCaption: caption,
     aiText: text,
     aiObjects: (p.aiObjects || []).slice(0, 20),
-    searchText: [caption, text, tags.join(' ')].join(' ').slice(0, 320),
+    searchText: [p.title, p.note, p.album, caption, text, tags.join(' ')].join(' ').slice(0, 2600),
   };
 }
-async function setIndex(env: Env, photos: Photo[]) {
-  const payload = JSON.stringify(photos.map(compactPhotoForIndex));
+async function setIndex(env: Env, photos: (Photo | PhotoIndexItem)[]) {
+  const payload = JSON.stringify(photos.map((p) => compactPhotoForIndex(photoFromIndexItem(p as any))));
   const gz = await gzipText(payload);
-  const res = await d9(env, 'PUT', INDEX_PATH, gz, { 'content-type': 'application/gzip', 'x-dat9-description': 'PhotoVault compact metadata index (gzip)' });
+  const res = await d9(env, 'PUT', INDEX_PATH, gz, { 'content-type': 'application/gzip', 'x-dat9-description': 'PhotoVault tiny listing index (gzip)' });
   if (!res.ok) throw new Error(`drive9 write ${INDEX_PATH} failed: ${res.status} ${await res.text()}`);
 }
+async function setPhotoMeta(env: Env, photo: Photo) {
+  const compact = compactPhotoMeta(photo);
+  const res = await d9(env, 'PUT', metaPath(photo.id), JSON.stringify(compact), { 'content-type': 'application/json', 'x-dat9-description': `PhotoVault metadata for ${photo.title}` });
+  if (!res.ok) throw new Error(`drive9 write ${metaPath(photo.id)} failed: ${res.status} ${await res.text()}`);
+}
+async function deletePhotoMeta(env: Env, id: string) {
+  const res = await d9(env, 'DELETE', metaPath(id));
+  if (!res.ok && res.status !== 404) throw new Error(`drive9 delete ${metaPath(id)} failed: ${res.status} ${await res.text()}`);
+}
+
 
 async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
   let changed = false;
@@ -138,9 +228,12 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
     }
   }
   if (changed) {
-    try { await setIndex(env, photos); } catch (e) { console.warn('setIndex after semantic refresh failed', e); }
+    try {
+      for (const p of photos) await setPhotoMeta(env, p);
+      await setIndex(env, photos);
+    } catch (e) { console.warn('semantic refresh metadata write failed', e); }
   }
-  return photos.map(compactPhotoForIndex);
+  return photos.map(compactPhotoMeta);
 }
 
 function scorePhoto(photo: Photo, q: string) {
@@ -289,7 +382,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const tag = (url.searchParams.get('tag') || '').toLowerCase();
       const owner = url.searchParams.get('owner') || '';
       const favorite = url.searchParams.get('favorite');
-      const photos = await refreshDrive9Semantics(env, await getIndex(env));
+      const photos = await refreshDrive9Semantics(env, await getAllPhotos(env));
       const filtered = photos
         .filter((p) => !p.archived)
         .map((p) => ({ photo: p, score: scorePhoto(p, q) }))
@@ -333,16 +426,17 @@ async function handle(req: Request, env: Env): Promise<Response> {
         searchText: analysis.searchText,
         analysisStatus: analysis.status,
       };
-      const photos = await getIndex(env);
+      const photos = await getAllPhotos(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
       photos.unshift(photo);
+      await setPhotoMeta(env, photo);
       await setIndex(env, photos);
       return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9', analysis: { caption: photo.aiCaption, text: photo.aiText, objects: photo.aiObjects } }, { status: 201 });
     }
     const fileMatch = path.match(/^\/api\/photos\/([^/]+)\/file$/);
     if (fileMatch && req.method === 'GET') {
       const id = fileMatch[1];
-      const photo = (await getIndex(env)).find((p) => p.id === id && !p.archived);
+      const photo = (await getAllPhotos(env)).find((p) => p.id === id && !p.archived);
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
       const obj = await d9(env, 'GET', photo.objectKey);
       if (!obj.ok) return json({ error: 'drive9 read failed', status: obj.status, detail: await obj.text() }, { status: 502 });
@@ -352,7 +446,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
     if (photoMatch && req.method === 'PATCH') {
       const id = photoMatch[1];
       const patch = await req.json<any>().catch(() => ({}));
-      const photos = await getIndex(env);
+      const photos = await getAllPhotos(env);
       const i = photos.findIndex((p) => p.id === id);
       if (i < 0) return json({ error: 'photo not found' }, { status: 404 });
       const prev = photos[i];
@@ -366,19 +460,21 @@ async function handle(req: Request, env: Env): Promise<Response> {
         updatedAt: new Date().toISOString(),
       };
       photos[i] = next;
+      await setPhotoMeta(env, next);
       await setIndex(env, photos);
       return json({ photo: { ...next, url: `${url.origin}/api/photos/${id}/file` }, storage: 'drive9' });
     }
     if (photoMatch && req.method === 'DELETE') {
       const id = photoMatch[1];
-      const photos = await getIndex(env);
+      const photos = await getAllPhotos(env);
       const found = photos.find((p) => p.id === id);
       if (found) await d9(env, 'DELETE', found.objectKey);
+      await deletePhotoMeta(env, id);
       await setIndex(env, photos.filter((p) => p.id !== id));
       return new Response(null, { status: 204, headers: cors });
     }
     if (path === '/api/collections' && req.method === 'GET') {
-      const photos = (await refreshDrive9Semantics(env, await getIndex(env))).filter((p) => !p.archived);
+      const photos = (await refreshDrive9Semantics(env, await getAllPhotos(env))).filter((p) => !p.archived);
       const tags: Record<string, number> = {}, albums: Record<string, number> = {}, dupes: Record<string, string[]> = {};
       for (const p of photos) {
         albums[p.album] = (albums[p.album] || 0) + 1;
