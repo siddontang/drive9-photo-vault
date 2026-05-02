@@ -31,6 +31,7 @@ function App() {
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const [expandedTags, setExpandedTags] = useState({});
+  const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
 
   async function load() {
@@ -144,7 +145,7 @@ function App() {
           <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
           <div className="sub">{p.album} · {fmt(p.size)}</div>
           {p.analysisStatus === 'pending' && <div className="pending">drive9 analyzing… refresh/search again in a few seconds</div>}
-          {p.aiCaption && <details className="summaryBox"><summary>Summary</summary><div>{p.aiCaption}</div></details>}
+          {p.aiCaption && <div className="summaryBox"><div className="summaryHead"><b>Summary</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? 'show less' : 'show more'}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{p.aiCaption}</div></div>}
           {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{(expandedTags[p.id] ? p.tags : p.tags.slice(0, 5)).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}{p.tags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? 'hide' : `+${p.tags.length - 5} more`}</button>}</div></div>}
           <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
         </div>
