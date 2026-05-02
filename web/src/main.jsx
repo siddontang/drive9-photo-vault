@@ -1,12 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Camera, Cloud, Heart, Images, Layers3, Search, Sparkles, Tag, Upload, Wand2, Trash2 } from 'lucide-react';
+import { Heart, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
 
-const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddon.workers.dev';
+const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddontang.workers.dev';
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
 
-function fmt(n) { return n > 1024 * 1024 ? `${(n/1024/1024).toFixed(1)} MB` : `${(n/1024).toFixed(0)} KB`; }
+function fmt(n = 0) {
+  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
 function guessTags(name) {
   const base = name.toLowerCase();
   const tags = [];
@@ -21,45 +25,56 @@ function App() {
   const [photos, setPhotos] = useState([]);
   const [collections, setCollections] = useState(null);
   const [q, setQ] = useState('');
-  const [activeTag, setActiveTag] = useState('');
+  const [tag, setTag] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState({ title: '', tags: '', album: 'Inbox', note: '' });
-
+  const [showDetails, setShowDetails] = useState(false);
+  const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
 
   async function load() {
     setError('');
     const params = new URLSearchParams();
     if (q) params.set('q', q);
-    if (activeTag) params.set('tag', activeTag);
+    if (tag) params.set('tag', tag);
     const [p, c] = await Promise.all([
       fetch(`${API}/api/photos?${params}`).then(r => r.json()),
       fetch(`${API}/api/collections`).then(r => r.json())
     ]);
-    setPhotos(p.photos || []); setCollections(c);
+    setPhotos(p.photos || []);
+    setCollections(c);
   }
-  useEffect(() => { const t = setTimeout(load, 180); return () => clearTimeout(t); }, [q, activeTag]);
+
+  useEffect(() => {
+    const t = setTimeout(load, 180);
+    return () => clearTimeout(t);
+  }, [q, tag]);
 
   async function upload(files) {
     if (!files?.length) return;
-    setBusy(true); setError('');
+    setBusy(true);
+    setError('');
     try {
       for (const file of files) {
         const fd = new FormData();
         fd.set('file', file);
         fd.set('owner', owner);
-        fd.set('title', draft.title || file.name.replace(/\.[^.]+$/, ''));
+        fd.set('title', file.name.replace(/\.[^.]+$/, '') || 'Untitled photo');
         fd.set('tags', draft.tags || guessTags(file.name));
         fd.set('album', draft.album || 'Inbox');
-        fd.set('note', draft.note || 'Uploaded into a Drive9-style photo workspace.');
+        fd.set('note', draft.note || '');
         const res = await fetch(`${API}/api/photos`, { method: 'POST', body: fd });
         if (!res.ok) throw new Error(await res.text());
       }
-      setDraft({ title: '', tags: '', album: 'Inbox', note: '' });
+      setDraft({ tags: '', album: 'Inbox', note: '' });
+      setShowDetails(false);
       await load();
-    } catch (e) { setError(e.message || String(e)); }
-    finally { setBusy(false); }
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
   }
+
   async function patch(id, body) {
     await fetch(`${API}/api/photos/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     await load();
@@ -68,59 +83,56 @@ function App() {
     await fetch(`${API}/api/photos/${id}`, { method: 'DELETE' });
     await load();
   }
-  const heroStats = collections?.totals || { photos: 0, favorites: 0, bytes: 0 };
+
+  const totals = collections?.totals || { photos: 0, favorites: 0, bytes: 0 };
+  const tags = collections?.tags || [];
 
   return <main>
-    <section className="hero">
+    <header className="topbar">
       <div>
-        <div className="eyebrow"><Cloud size={16}/> Drive9-inspired photo workspace</div>
-        <h1>Your iPhone photo roll, rebuilt for search-first humans.</h1>
-        <p>Upload images from desktop or phone, tag them, favorite the keepers, detect duplicates, and search by context. Cloudflare Worker exposes the OpenAPI; drive9 stores the actual photo workspace.</p>
-        <div className="actions"><label className="uploadButton picker"><Upload size={18}/> Upload photos<input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} /></label><a href={`${API}/openapi.json`} target="_blank">OpenAPI</a></div>
+        <h1>PhotoVault</h1>
+        <p>Upload. Search. Organize.</p>
       </div>
-      <div className="statGrid">
-        <div><Images/><b>{heroStats.photos}</b><span>photos</span></div>
-        <div><Heart/><b>{heroStats.favorites}</b><span>favorites</span></div>
-        <div><Layers3/><b>{fmt(heroStats.bytes || 0)}</b><span>stored</span></div>
-      </div>
-    </section>
+      <a href={`${API}/openapi.json`} target="_blank">API</a>
+    </header>
 
-    <section className="panel upload" onDragOver={e=>e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
-      <label className="drop picker"><Camera size={30}/><b>Tap here to choose photos</b><span>This is a real native file picker for mobile browsers. Desktop also supports drag & drop. Max 25MB/image.</span><input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} /></label>
-      <div className="fields">
-        <input placeholder="Title override (optional)" value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/>
-        <input placeholder="Tags: travel, receipt, whiteboard" value={draft.tags} onChange={e=>setDraft({...draft,tags:e.target.value})}/>
-        <input placeholder="Album" value={draft.album} onChange={e=>setDraft({...draft,album:e.target.value})}/>
-        <input placeholder="Note / memory" value={draft.note} onChange={e=>setDraft({...draft,note:e.target.value})}/>
-      </div>
-      {busy && <div className="hint"><Sparkles size={16}/> Uploading and indexing…</div>}
+    <section className="uploadCard" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
+      <label className="uploadButton picker">
+        <Upload size={22} />
+        <span>{busy ? 'Uploading…' : 'Choose photos'}</span>
+        <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
+      </label>
+      <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? 'Hide options' : 'Add tags / album'}</button>
+      {showDetails && <div className="details">
+        <input placeholder="Tags, comma separated" value={draft.tags} onChange={e => setDraft({ ...draft, tags: e.target.value })} />
+        <input placeholder="Album" value={draft.album} onChange={e => setDraft({ ...draft, album: e.target.value })} />
+        <input className="wide" placeholder="Note" value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })} />
+      </div>}
       {error && <div className="error">{error}</div>}
     </section>
 
-    <section className="toolbar">
-      <label><Search size={18}/><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search: beach, receipt, Siddon, whiteboard…" /></label>
-      <button className={!activeTag ? 'active' : ''} onClick={()=>setActiveTag('')}>All</button>
-      {(collections?.tags || []).slice(0,8).map(t => <button key={t.name} className={activeTag===t.name?'active':''} onClick={()=>setActiveTag(t.name)}><Tag size={14}/>{t.name} <small>{t.count}</small></button>)}
-    </section>
-
-    <section className="smart">
-      {(collections?.smart || []).map(s => <div key={s.id}><Wand2 size={18}/><b>{s.name}</b><span>{s.count}</span></div>)}
-      {(collections?.albums || []).slice(0,4).map(a => <div key={a.name}><Layers3 size={18}/><b>{a.name}</b><span>{a.count}</span></div>)}
+    <section className="searchCard">
+      <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search photos…" /></label>
+      <div className="stats"><b>{totals.photos}</b> photos · <b>{totals.favorites}</b> favorites · <b>{fmt(totals.bytes)}</b></div>
+      <div className="chips">
+        <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>All</button>
+        {tags.slice(0, 8).map(t => <button key={t.name} className={tag === t.name ? 'active' : ''} onClick={() => setTag(t.name)}>{t.name}</button>)}
+      </div>
     </section>
 
     <section className="grid">
-      {photos.map(p => <article key={p.id} className="card">
+      {photos.map(p => <article key={p.id} className="photo">
         <img src={p.url} loading="lazy" />
-        <div className="cardBody">
-          <div className="row"><b>{p.title}</b><button className={p.favorite?'heart on':'heart'} onClick={()=>patch(p.id,{favorite:!p.favorite})}><Heart size={17}/></button></div>
-          <p>{p.note || 'No note yet.'}</p>
-          <div className="chips">{p.tags.map(t => <button key={t} onClick={()=>setActiveTag(t)}>{t}</button>)}</div>
-          <div className="meta"><span>{p.album}</span><span>{fmt(p.size)}</span><button title="Delete" onClick={()=>remove(p.id)}><Trash2 size={15}/></button></div>
+        <div className="photoInfo">
+          <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
+          <div className="sub">{p.album} · {fmt(p.size)}</div>
+          {!!p.tags.length && <div className="miniTags">{p.tags.slice(0, 4).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div>}
+          <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
         </div>
       </article>)}
-      {!photos.length && <div className="empty">No photos yet. Add a few and the workspace becomes useful fast.</div>}
+      {!photos.length && <div className="empty">No photos yet. Tap “Choose photos” to start.</div>}
     </section>
-  </main>
+  </main>;
 }
 
 createRoot(document.getElementById('root')).render(<App />);
