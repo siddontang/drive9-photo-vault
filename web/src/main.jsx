@@ -127,7 +127,7 @@ function App() {
           <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
           <div className="sub">{p.album} · {fmt(p.size)}</div>
           {p.aiCaption && <div className="caption">{p.aiCaption}</div>}
-          {!!p.tags.length && <div className="miniTags">{p.tags.slice(0, 4).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div>}
+          {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{p.tags.map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div></div>}
           <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
         </div>
       </article>)}
