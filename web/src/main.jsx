@@ -151,6 +151,8 @@ function App() {
       </article>)}
       {!photos.length && <div className="empty">No photos yet. Tap “Choose photos” to start.</div>}
     </section>
+
+    <footer className="footer">Powered by <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
   </main>;
 }
 
