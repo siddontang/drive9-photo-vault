@@ -85,6 +85,63 @@ function scorePhoto(photo: Photo, q: string) {
   if (!words.length) return 1;
   return words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0) / words.length;
 }
+
+type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
+type Drive9PresignedPart = { number: number; url: string; size: number; headers?: Record<string, string> };
+type Drive9CompletePart = { number: number; etag: string };
+const DIRECT_PUT_LIMIT = 50_000;
+
+async function drive9Upload(env: Env, path: string, buf: ArrayBuffer, mime: string, description: string, tags: Record<string, string> = {}) {
+  if (buf.byteLength < DIRECT_PUT_LIMIT) {
+    const res = await d9(env, 'PUT', path, buf, {
+      'content-type': mime,
+      'x-dat9-description': description,
+      ...Object.fromEntries(Object.entries(tags).map(([k, v]) => [`x-dat9-tag-${k}`, v])),
+    });
+    if (!res.ok) throw new Error(`drive9 direct upload failed: ${res.status} ${await res.text()}`);
+    return;
+  }
+
+  const init = await fetch(`${drive9Base(env)}/v2/uploads/initiate`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ path, total_size: buf.byteLength, description }),
+  });
+  if (!init.ok) throw new Error(`drive9 multipart initiate failed: ${init.status} ${await init.text()}`);
+  const plan = await init.json<Drive9UploadPlan>();
+
+  const batchSize = 8;
+  const completed: Drive9CompletePart[] = [];
+  for (let start = 1; start <= plan.total_parts; start += batchSize) {
+    const end = Math.min(plan.total_parts, start + batchSize - 1);
+    const presign = await fetch(`${drive9Base(env)}/v2/uploads/${plan.upload_id}/presign-batch`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ parts: Array.from({ length: end - start + 1 }, (_, i) => ({ part_number: start + i })) }),
+    });
+    if (!presign.ok) throw new Error(`drive9 multipart presign failed: ${presign.status} ${await presign.text()}`);
+    const presigned = await presign.json<{ parts: Drive9PresignedPart[] }>();
+    const uploaded = await Promise.all(presigned.parts.map(async (part) => {
+      const offset = (part.number - 1) * plan.part_size;
+      const chunk = buf.slice(offset, offset + part.size);
+      const headers = new Headers(part.headers || {});
+      headers.delete('host');
+      const up = await fetch(part.url, { method: 'PUT', headers, body: chunk });
+      if (!up.ok) throw new Error(`drive9 part ${part.number} upload failed: ${up.status} ${await up.text()}`);
+      return { number: part.number, etag: up.headers.get('etag') || '' };
+    }));
+    completed.push(...uploaded);
+  }
+
+  completed.sort((a, b) => a.number - b.number);
+  const complete = await fetch(`${drive9Base(env)}/v2/uploads/${plan.upload_id}/complete`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ parts: completed, tags }),
+  });
+  if (!complete.ok) throw new Error(`drive9 multipart complete failed: ${complete.status} ${await complete.text()}`);
+}
+
 function openapi(origin: string) {
   return {
     openapi: '3.1.0',
@@ -162,13 +219,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         createdAt: now,
         updatedAt: now,
       };
-      const upload = await d9(env, 'PUT', objectKey, buf, {
-        'content-type': file.type,
-        'x-dat9-description': [photo.title, photo.note, photo.album, tags.join(' ')].filter(Boolean).join(' — '),
-        'x-dat9-tag-app': 'photovault',
-        'x-dat9-tag-album': photo.album,
-      });
-      if (!upload.ok) return json({ error: 'drive9 upload failed', status: upload.status, detail: await upload.text() }, { status: 502 });
+      await drive9Upload(env, objectKey, buf, file.type, [photo.title, photo.note, photo.album, tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: photo.album });
       const photos = await getIndex(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
       photos.unshift(photo);
