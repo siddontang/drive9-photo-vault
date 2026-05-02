@@ -30,6 +30,7 @@ function App() {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
+  const [expandedTags, setExpandedTags] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
 
   async function load() {
@@ -144,7 +145,7 @@ function App() {
           <div className="sub">{p.album} · {fmt(p.size)}</div>
           {p.analysisStatus === 'pending' && <div className="pending">drive9 analyzing… refresh/search again in a few seconds</div>}
           {p.aiCaption && <div className="caption">{p.aiCaption}</div>}
-          {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{p.tags.map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div></div>}
+          {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{(expandedTags[p.id] ? p.tags : p.tags.slice(0, 5)).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}{p.tags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? 'hide' : `+${p.tags.length - 5} more`}</button>}</div></div>}
           <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
         </div>
       </article>)}
