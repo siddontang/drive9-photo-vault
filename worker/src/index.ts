@@ -1,3 +1,5 @@
+import { buildDrive9SemanticResult } from './semantic';
+
 export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
@@ -245,42 +247,13 @@ function scorePhoto(photo: Photo, q: string) {
 }
 
 
-function cleanWords(words: unknown): string[] {
-  if (!Array.isArray(words)) return [];
-  return [...new Set(words.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 30);
-}
-function extractTagsFromDrive9Text(text: string, existingTags: string[] = []) {
-  const lower = text.toLowerCase();
-  const candidates = new Set(existingTags.map((x) => x.trim().toLowerCase()).filter(Boolean));
-  const phrases = ['tidb cloud', 'drive9', 'openapi', 'photo management', 'screenshot', 'iphone', 'claw酱', '豆包', 'error', 'upload', 'search'];
-  for (const p of phrases) if (lower.includes(p.toLowerCase())) candidates.add(p);
-  for (const m of lower.matchAll(/[a-z][a-z0-9+#.-]{2,}/g)) {
-    const w = m[0];
-    if (!['the','and','with','this','that','from','image','photo','visible','text','用于文件搜索','主要物体','场景描述'].includes(w)) candidates.add(w);
-    if (candidates.size >= 24) break;
-  }
-  for (const m of text.matchAll(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g)) {
-    const w = m[0].trim();
-    if (w.length >= 2 && !['主要物体','场景描述','图中可见文字','中文描述','用于文件搜索'].includes(w)) candidates.add(w.toLowerCase());
-    if (candidates.size >= 30) break;
-  }
-  return [...candidates].slice(0, 30);
-}
-function captionFromDrive9Text(text: string) {
-  const cleaned = text.replace(/\*\*/g, '').replace(/图中可见文字（OCR）[\s\S]*$/i, '').trim();
-  return cleaned.split(/[。\n]/).map((x) => x.trim()).filter(Boolean)[0]?.slice(0, 500) || 'Uploaded image';
-}
 async function getDrive9Semantic(env: Env, path: string, existingTags: string[]) {
   for (let i = 0; i < 12; i++) {
     const res = await d9(env, 'GET', path, null, {}, '?stat=1');
     if (res.ok) {
       const meta = await res.json<any>();
-      const semantic = String(meta.semantic_text || '').trim();
-      const driveTags = meta.tags && typeof meta.tags === 'object' ? Object.values(meta.tags).map(String) : [];
-      if (semantic) {
-        const tags = extractTagsFromDrive9Text(semantic, [...existingTags, ...driveTags]);
-        return { caption: captionFromDrive9Text(semantic), text: semantic, objects: [] as string[], tags, searchText: semantic + ' ' + tags.join(' '), status: 'drive9' };
-      }
+      const analysis = buildDrive9SemanticResult(meta, existingTags);
+      if (analysis) return analysis;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
