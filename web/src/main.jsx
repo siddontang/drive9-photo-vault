@@ -27,6 +27,7 @@ function App() {
   const [q, setQ] = useState('');
   const [tag, setTag] = useState('');
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
@@ -52,9 +53,12 @@ function App() {
   async function upload(files) {
     if (!files?.length) return;
     setBusy(true);
+    setProgress(`Preparing ${files.length} photo${files.length > 1 ? 's' : ''}…`);
     setError('');
     try {
+      let done = 0;
       for (const file of files) {
+        setProgress(`Uploading ${file.name} (${done + 1}/${files.length})…`);
         const fd = new FormData();
         fd.set('file', file);
         fd.set('owner', owner);
@@ -63,11 +67,22 @@ function App() {
         fd.set('album', draft.album || 'Inbox');
         fd.set('note', draft.note || '');
         const res = await fetch(`${API}/api/photos`, { method: 'POST', body: fd });
+        setProgress(`Saving to drive9 and extracting image metadata (${done + 1}/${files.length})…`);
         if (!res.ok) throw new Error(await res.text());
+        const payload = await res.json();
+        if (payload?.photo?.analysisStatus === 'pending') {
+          setProgress(`Uploaded ${file.name}. drive9 is still analyzing; tags will appear after refresh.`);
+        } else {
+          setProgress(`Indexed ${file.name} (${done + 1}/${files.length})…`);
+        }
+        done++;
       }
       setDraft({ tags: '', album: 'Inbox', note: '' });
       setShowDetails(false);
+      setProgress('Refreshing library…');
       await load();
+      setProgress('Done');
+      setTimeout(() => setProgress(''), 1800);
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -99,7 +114,7 @@ function App() {
     <section className="uploadCard" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
       <label className="uploadButton picker">
         <Upload size={22} />
-        <span>{busy ? 'Uploading & analyzing…' : 'Choose photos'}</span>
+        <span>{busy ? 'Working…' : 'Choose photos'}</span>
         <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
       </label>
       <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? 'Hide options' : 'Add tags / album'}</button>
@@ -108,6 +123,7 @@ function App() {
         <input placeholder="Album" value={draft.album} onChange={e => setDraft({ ...draft, album: e.target.value })} />
         <input className="wide" placeholder="Note" value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })} />
       </div>}
+      {progress && <div className={busy ? 'progress' : 'progress done'}>{progress}</div>}
       {error && <div className="error">{error}</div>}
     </section>
 
@@ -126,6 +142,7 @@ function App() {
         <div className="photoInfo">
           <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
           <div className="sub">{p.album} · {fmt(p.size)}</div>
+          {p.analysisStatus === 'pending' && <div className="pending">drive9 analyzing… refresh/search again in a few seconds</div>}
           {p.aiCaption && <div className="caption">{p.aiCaption}</div>}
           {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{p.tags.map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}</div></div>}
           <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>

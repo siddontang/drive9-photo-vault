@@ -24,6 +24,7 @@ type Photo = {
   aiText?: string;
   aiObjects?: string[];
   searchText?: string;
+  analysisStatus?: string;
 };
 
 const INDEX_PATH = '/photovault/index.json';
@@ -98,6 +99,7 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
       p.aiObjects = analysis.objects;
       p.tags = analysis.tags.length ? analysis.tags : p.tags;
       p.searchText = analysis.searchText;
+      p.analysisStatus = analysis.status;
       p.updatedAt = new Date().toISOString();
       changed = true;
     }
@@ -294,6 +296,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         aiText: analysis.text,
         aiObjects: analysis.objects,
         searchText: analysis.searchText,
+        analysisStatus: analysis.status,
       };
       const photos = await getIndex(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
