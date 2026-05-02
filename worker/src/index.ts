@@ -1,7 +1,6 @@
 export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
-  AI?: { run: (model: string, input: unknown) => Promise<any> };
 }
 
 type Photo = {
@@ -83,6 +82,30 @@ async function getIndex(env: Env): Promise<Photo[]> {
 async function setIndex(env: Env, photos: Photo[]) {
   await d9WriteJson(env, INDEX_PATH, photos);
 }
+
+async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
+  let changed = false;
+  let checked = 0;
+  for (const p of photos) {
+    if (checked >= limit) break;
+    const needs = !p.aiText || p.aiCaption?.includes('still analyzing') || p.tags.length <= 2;
+    if (!needs || p.archived) continue;
+    checked++;
+    const analysis = await getDrive9Semantic(env, p.objectKey, p.tags);
+    if (analysis.text) {
+      p.aiCaption = analysis.caption;
+      p.aiText = analysis.text;
+      p.aiObjects = analysis.objects;
+      p.tags = analysis.tags.length ? analysis.tags : p.tags;
+      p.searchText = analysis.searchText;
+      p.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) await setIndex(env, photos);
+  return photos;
+}
+
 function scorePhoto(photo: Photo, q: string) {
   if (!q) return 1;
   const hay = [photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner, photo.aiCaption || '', photo.aiText || '', (photo.aiObjects || []).join(' '), photo.searchText || ''].join(' ').toLowerCase();
@@ -94,44 +117,45 @@ function scorePhoto(photo: Photo, q: string) {
 
 function cleanWords(words: unknown): string[] {
   if (!Array.isArray(words)) return [];
-  return [...new Set(words.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+  return [...new Set(words.map(String).map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 30);
 }
-function parseJsonLoose(text: string): any | null {
-  try { return JSON.parse(text); } catch {}
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { return JSON.parse(m[0]); } catch { return null; }
-}
-async function analyzeImage(env: Env, buf: ArrayBuffer, existingTags: string[]) {
-  const fallback = {
-    caption: 'Uploaded image',
-    text: '',
-    objects: [] as string[],
-    tags: existingTags,
-    searchText: existingTags.join(' '),
-    status: 'fallback',
-  };
-  if (!env.AI) return fallback;
-  try {
-    const bytes = [...new Uint8Array(buf)];
-    const prompt = `Analyze this image for a photo management app. Return ONLY compact JSON with keys: caption (one sentence), text (visible OCR text, empty if none), objects (array of concrete visible things), tags (array of 5-12 short searchable tags). Include company/product names if visible. No markdown.`;
-    const [out, ocrOut] = await Promise.all([
-      env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', { image: bytes, prompt }),
-      env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', { image: bytes, prompt: 'OCR task: transcribe ALL visible text in this image exactly. Include usernames, product names, errors, hashtags, UI labels, and URLs. Return plain text only. If no text is visible, return an empty string.' }),
-    ]);
-    const raw = typeof out === 'string' ? out : (out?.description || out?.response || out?.result || JSON.stringify(out));
-    const ocrRaw = typeof ocrOut === 'string' ? ocrOut : (ocrOut?.description || ocrOut?.response || ocrOut?.result || '');
-    const parsed = parseJsonLoose(raw) || { caption: raw };
-    const caption = String(parsed.caption || '').slice(0, 500);
-    const text = [String(parsed.text || parsed.ocr || ''), String(ocrRaw || '')].filter(Boolean).join('\n').slice(0, 2000);
-    const objects = cleanWords(parsed.objects);
-    const tags = cleanWords([...(existingTags || []), ...(Array.isArray(parsed.tags) ? parsed.tags : []), ...objects, ...tokenize(text).filter((w) => w.length > 2).slice(0, 10)]);
-    return { caption, text, objects, tags, searchText: [caption, text, objects.join(' '), tags.join(' ')].join(' '), status: 'ai' };
-  } catch (e: any) {
-    return { ...fallback, caption: `Uploaded image. AI analysis unavailable: ${String(e?.message || e).slice(0, 120)}`, status: 'error' };
+function extractTagsFromDrive9Text(text: string, existingTags: string[] = []) {
+  const lower = text.toLowerCase();
+  const candidates = new Set(existingTags.map((x) => x.trim().toLowerCase()).filter(Boolean));
+  const phrases = ['tidb cloud', 'drive9', 'openapi', 'photo management', 'screenshot', 'iphone', 'claw酱', '豆包', 'error', 'upload', 'search'];
+  for (const p of phrases) if (lower.includes(p.toLowerCase())) candidates.add(p);
+  for (const m of lower.matchAll(/[a-z][a-z0-9+#.-]{2,}/g)) {
+    const w = m[0];
+    if (!['the','and','with','this','that','from','image','photo','visible','text','用于文件搜索','主要物体','场景描述'].includes(w)) candidates.add(w);
+    if (candidates.size >= 24) break;
   }
+  for (const m of text.matchAll(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g)) {
+    const w = m[0].trim();
+    if (w.length >= 2 && !['主要物体','场景描述','图中可见文字','中文描述','用于文件搜索'].includes(w)) candidates.add(w.toLowerCase());
+    if (candidates.size >= 30) break;
+  }
+  return [...candidates].slice(0, 30);
 }
-
+function captionFromDrive9Text(text: string) {
+  const cleaned = text.replace(/\*\*/g, '').replace(/图中可见文字（OCR）[\s\S]*$/i, '').trim();
+  return cleaned.split(/[。\n]/).map((x) => x.trim()).filter(Boolean)[0]?.slice(0, 500) || 'Uploaded image';
+}
+async function getDrive9Semantic(env: Env, path: string, existingTags: string[]) {
+  for (let i = 0; i < 12; i++) {
+    const res = await d9(env, 'GET', path, null, {}, '?stat=1');
+    if (res.ok) {
+      const meta = await res.json<any>();
+      const semantic = String(meta.semantic_text || '').trim();
+      const driveTags = meta.tags && typeof meta.tags === 'object' ? Object.values(meta.tags).map(String) : [];
+      if (semantic) {
+        const tags = extractTagsFromDrive9Text(semantic, [...existingTags, ...driveTags]);
+        return { caption: captionFromDrive9Text(semantic), text: semantic, objects: [] as string[], tags, searchText: semantic + ' ' + tags.join(' '), status: 'drive9' };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return { caption: 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.', text: '', objects: [] as string[], tags: existingTags, searchText: existingTags.join(' '), status: 'pending' };
+}
 type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
 type Drive9PresignedPart = { number: number; url: string; size: number; headers?: Record<string, string> };
 type Drive9CompletePart = { number: number; etag: string };
@@ -228,7 +252,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const tag = (url.searchParams.get('tag') || '').toLowerCase();
       const owner = url.searchParams.get('owner') || '';
       const favorite = url.searchParams.get('favorite');
-      const photos = await getIndex(env);
+      const photos = await refreshDrive9Semantics(env, await getIndex(env));
       const filtered = photos
         .filter((p) => !p.archived)
         .map((p) => ({ photo: p, score: scorePhoto(p, q) }))
@@ -249,7 +273,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const id = crypto.randomUUID();
       const objectKey = `${ROOT}/photos/${id}.${extFor(file.type)}`;
       const tags = String(form.get('tags') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
-      const analysis = await analyzeImage(env, buf, tags);
+      await drive9Upload(env, objectKey, buf, file.type, [String(form.get('title') || file.name), String(form.get('note') || ''), String(form.get('album') || 'Inbox'), tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: String(form.get('album') || 'Inbox') });
+      const analysis = await getDrive9Semantic(env, objectKey, tags);
       const photo: Photo = {
         id,
         owner: String(form.get('owner') || 'guest'),
@@ -270,7 +295,6 @@ async function handle(req: Request, env: Env): Promise<Response> {
         aiObjects: analysis.objects,
         searchText: analysis.searchText,
       };
-      await drive9Upload(env, objectKey, buf, file.type, [photo.title, photo.note, photo.album, photo.aiCaption, photo.aiText, photo.tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: photo.album });
       const photos = await getIndex(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
       photos.unshift(photo);
@@ -316,7 +340,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       return new Response(null, { status: 204, headers: cors });
     }
     if (path === '/api/collections' && req.method === 'GET') {
-      const photos = (await getIndex(env)).filter((p) => !p.archived);
+      const photos = (await refreshDrive9Semantics(env, await getIndex(env))).filter((p) => !p.archived);
       const tags: Record<string, number> = {}, albums: Record<string, number> = {}, dupes: Record<string, string[]> = {};
       for (const p of photos) {
         albums[p.album] = (albums[p.album] || 0) + 1;
