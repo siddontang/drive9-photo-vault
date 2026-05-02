@@ -27,7 +27,8 @@ type Photo = {
   analysisStatus?: string;
 };
 
-const INDEX_PATH = '/photovault/index.json';
+const INDEX_PATH = '/photovault/index.json.gz';
+const LEGACY_INDEX_PATH = '/photovault/index.json';
 const ROOT = '/photovault';
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -77,24 +78,43 @@ async function d9WriteJson(env: Env, path: string, data: unknown) {
   const res = await d9(env, 'PUT', path, JSON.stringify(data), { 'content-type': 'application/json', 'x-dat9-description': 'PhotoVault metadata index' });
   if (!res.ok) throw new Error(`drive9 write ${path} failed: ${res.status} ${await res.text()}`);
 }
+async function gzipText(textValue: string): Promise<ArrayBuffer> {
+  const stream = new Blob([textValue]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Response(stream).arrayBuffer();
+}
+async function gunzipText(buf: ArrayBuffer): Promise<string> {
+  const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+}
 async function getIndex(env: Env): Promise<Photo[]> {
-  return d9ReadJson<Photo[]>(env, INDEX_PATH, []);
+  const res = await d9(env, 'GET', INDEX_PATH);
+  if (res.ok) {
+    const buf = await res.arrayBuffer();
+    return JSON.parse(await gunzipText(buf));
+  }
+  if (res.status !== 404) throw new Error(`drive9 read ${INDEX_PATH} failed: ${res.status} ${await res.text()}`);
+  // One-time fallback for older plain JSON index; next write migrates to gzip.
+  return d9ReadJson<Photo[]>(env, LEGACY_INDEX_PATH, []);
 }
 function compactPhotoForIndex(p: Photo): Photo {
-  const caption = (p.aiCaption || '').slice(0, 500);
-  const text = (p.aiText || '').slice(0, 1200);
-  const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 16);
+  const caption = (p.aiCaption || '').slice(0, 160);
+  // Keep index tiny. Full drive9 semantic/OCR text stays in drive9 stat metadata, not in index.json.
+  const text = (p.aiText || '').slice(0, 120);
+  const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 8);
   return {
     ...p,
     tags,
     aiCaption: caption,
     aiText: text,
     aiObjects: (p.aiObjects || []).slice(0, 20),
-    searchText: [caption, text, tags.join(' ')].join(' ').slice(0, 1800),
+    searchText: [caption, text, tags.join(' ')].join(' ').slice(0, 320),
   };
 }
 async function setIndex(env: Env, photos: Photo[]) {
-  await d9WriteJson(env, INDEX_PATH, photos.map(compactPhotoForIndex));
+  const payload = JSON.stringify(photos.map(compactPhotoForIndex));
+  const gz = await gzipText(payload);
+  const res = await d9(env, 'PUT', INDEX_PATH, gz, { 'content-type': 'application/gzip', 'x-dat9-description': 'PhotoVault compact metadata index (gzip)' });
+  if (!res.ok) throw new Error(`drive9 write ${INDEX_PATH} failed: ${res.status} ${await res.text()}`);
 }
 
 async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
@@ -108,10 +128,10 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
     const analysis = await getDrive9Semantic(env, p.objectKey, p.tags);
     if (analysis.text) {
       p.aiCaption = analysis.caption;
-      p.aiText = analysis.text;
+      p.aiText = analysis.text.slice(0, 220);
       p.aiObjects = analysis.objects;
       p.tags = analysis.tags.length ? analysis.tags : p.tags;
-      p.searchText = analysis.searchText;
+      p.searchText = analysis.searchText.slice(0, 500);
       p.analysisStatus = analysis.status;
       p.updatedAt = new Date().toISOString();
       changed = true;
