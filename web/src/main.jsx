@@ -25,7 +25,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [draft, setDraft] = useState({ title: '', tags: '', album: 'Inbox', note: '' });
-  const fileRef = useRef(null);
+
 
   async function load() {
     setError('');
@@ -56,7 +56,6 @@ function App() {
         if (!res.ok) throw new Error(await res.text());
       }
       setDraft({ title: '', tags: '', album: 'Inbox', note: '' });
-      if (fileRef.current) fileRef.current.value = '';
       await load();
     } catch (e) { setError(e.message || String(e)); }
     finally { setBusy(false); }
@@ -77,7 +76,7 @@ function App() {
         <div className="eyebrow"><Cloud size={16}/> Drive9-inspired photo workspace</div>
         <h1>Your iPhone photo roll, rebuilt for search-first humans.</h1>
         <p>Upload images from desktop or phone, tag them, favorite the keepers, detect duplicates, and search by context. Cloudflare Worker exposes the OpenAPI; drive9 stores the actual photo workspace.</p>
-        <div className="actions"><label className="uploadButton" htmlFor="photo-upload"><Upload size={18}/> Upload photos</label><a href={`${API}/openapi.json`} target="_blank">OpenAPI</a></div>
+        <div className="actions"><label className="uploadButton picker"><Upload size={18}/> Upload photos<input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} /></label><a href={`${API}/openapi.json`} target="_blank">OpenAPI</a></div>
       </div>
       <div className="statGrid">
         <div><Images/><b>{heroStats.photos}</b><span>photos</span></div>
@@ -87,8 +86,7 @@ function App() {
     </section>
 
     <section className="panel upload" onDragOver={e=>e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
-      <input id="photo-upload" ref={fileRef} className="fileInput" type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
-      <label className="drop" htmlFor="photo-upload"><Camera size={30}/><b>Tap to choose photos</b><span>Desktop also supports drag & drop. Max 25MB/image.</span></label>
+      <label className="drop picker"><Camera size={30}/><b>Tap here to choose photos</b><span>This is a real native file picker for mobile browsers. Desktop also supports drag & drop. Max 25MB/image.</span><input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} /></label>
       <div className="fields">
         <input placeholder="Title override (optional)" value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/>
         <input placeholder="Tags: travel, receipt, whiteboard" value={draft.tags} onChange={e=>setDraft({...draft,tags:e.target.value})}/>
