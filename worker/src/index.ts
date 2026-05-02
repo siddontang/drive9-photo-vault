@@ -80,8 +80,21 @@ async function d9WriteJson(env: Env, path: string, data: unknown) {
 async function getIndex(env: Env): Promise<Photo[]> {
   return d9ReadJson<Photo[]>(env, INDEX_PATH, []);
 }
+function compactPhotoForIndex(p: Photo): Photo {
+  const caption = (p.aiCaption || '').slice(0, 500);
+  const text = (p.aiText || '').slice(0, 1200);
+  const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 16);
+  return {
+    ...p,
+    tags,
+    aiCaption: caption,
+    aiText: text,
+    aiObjects: (p.aiObjects || []).slice(0, 20),
+    searchText: [caption, text, tags.join(' ')].join(' ').slice(0, 1800),
+  };
+}
 async function setIndex(env: Env, photos: Photo[]) {
-  await d9WriteJson(env, INDEX_PATH, photos);
+  await d9WriteJson(env, INDEX_PATH, photos.map(compactPhotoForIndex));
 }
 
 async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
@@ -104,8 +117,10 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
       changed = true;
     }
   }
-  if (changed) await setIndex(env, photos);
-  return photos;
+  if (changed) {
+    try { await setIndex(env, photos); } catch (e) { console.warn('setIndex after semantic refresh failed', e); }
+  }
+  return photos.map(compactPhotoForIndex);
 }
 
 function scorePhoto(photo: Photo, q: string) {
