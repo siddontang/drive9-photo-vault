@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import { Heart, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
@@ -8,6 +9,14 @@ import { reanchorIndex } from './lightboxNav.js';
 
 const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddontang.workers.dev';
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
+
+function withViewTransition(update) {
+  if (typeof document !== 'undefined' && document.startViewTransition) {
+    document.startViewTransition(() => flushSync(update));
+  } else {
+    update();
+  }
+}
 
 function guessTags(name) {
   const base = name.toLowerCase();
@@ -188,9 +197,14 @@ function App() {
           <button
             className="photoOpen"
             type="button"
-            onClick={() => setLightboxId(p.id)}
+            onClick={() => withViewTransition(() => setLightboxId(p.id))}
           >
-            <img src={p.url} loading="lazy" alt={p.title} />
+            <img
+              src={p.url}
+              loading="lazy"
+              alt={p.title}
+              style={lightboxId == null ? { viewTransitionName: `photo-${p.id}` } : undefined}
+            />
           </button>
           <div className="photoInfo">
             <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
@@ -211,8 +225,9 @@ function App() {
       <Lightbox
         photos={photos}
         index={lightboxIndex}
-        onClose={() => setLightboxId(null)}
+        onClose={() => withViewTransition(() => setLightboxId(null))}
         onIndexChange={(i) => { const p = photos[i]; if (p) setLightboxId(p.id); }}
+        onTagClick={(tagName) => withViewTransition(() => { setTag(tagName); setLightboxId(null); })}
         lang={lang}
         t={t}
       />

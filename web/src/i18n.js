@@ -111,6 +111,14 @@ export function fmtBytes(n = 0) {
   return `${n} B`;
 }
 
+export function fmtDate(value, lang = 'en') {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const locale = lang === 'zh' ? 'zh-CN' : 'en-US';
+  return new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: 'numeric' }).format(d);
+}
+
 export function pickLangField(photo, lang, key) {
   const primary = photo[`${key}${lang === 'zh' ? 'Zh' : 'En'}`];
   const fallback = photo[`${key}${lang === 'zh' ? 'En' : 'Zh'}`];
