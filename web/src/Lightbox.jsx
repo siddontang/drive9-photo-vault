@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
-import { fmtBytes, pickLangField, pickLangTags } from './i18n';
+import { fmtBytes, fmtDate, pickLangField, pickLangTags } from './i18n';
 import {
   canGoNext,
   canGoPrev,
@@ -12,7 +12,7 @@ import {
 const IDLE_MS = 2500;
 const SHEET_DRAG_THRESHOLD = 60;
 
-export default function Lightbox({ photos, index, onClose, onIndexChange, lang, t }) {
+export default function Lightbox({ photos, index, onClose, onIndexChange, onTagClick = () => {}, lang, t }) {
   const photo = photos[index];
   const [showControls, setShowControls] = useState(true);
   const [showInfo, setShowInfo] = useState(() => {
@@ -152,13 +152,19 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, lang, 
     >
       <div className="lightboxBackdrop" aria-hidden="true" />
 
-      <div className="lightboxStage" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="lightboxStage" onClick={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (showInfo) toggleInfo(false);
+        else onClose();
+      }}>
         <img
+          key={photo.id}
           className="lightboxImage"
           src={photo.url}
           alt={photo.title}
           loading="eager"
           draggable={false}
+          style={{ viewTransitionName: `photo-${photo.id}` }}
         />
       </div>
 
@@ -238,7 +244,9 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, lang, 
         />
         <div className="lightboxInfoBody">
           <div className="lightboxInfoTitle">{photo.title}</div>
-          <div className="lightboxInfoMeta">{photo.album} · {fmtBytes(photo.size)}</div>
+          <div className="lightboxInfoMeta">
+            {[fmtDate(photo.createdAt, lang), photo.album, fmtBytes(photo.size)].filter(Boolean).join(' · ')}
+          </div>
           {caption && (
             <section className="lightboxInfoSection">
               <h4>{t.summary}</h4>
@@ -249,7 +257,9 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, lang, 
             <section className="lightboxInfoSection">
               <h4>{t.tagsLabel}</h4>
               <div className="lightboxInfoTags">
-                {tags.map((tag) => <span key={tag}>{tag}</span>)}
+                {tags.map((tag) => (
+                  <button key={tag} type="button" onClick={() => onTagClick(tag)}>{tag}</button>
+                ))}
               </div>
             </section>
           )}
