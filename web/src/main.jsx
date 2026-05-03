@@ -2,16 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Heart, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
-import { useLang, pickLangField, pickLangTags } from './i18n';
+import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
+import Lightbox from './Lightbox';
+import { reanchorIndex } from './lightboxNav.js';
 
 const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddontang.workers.dev';
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
 
-function fmt(n = 0) {
-  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
-}
 function guessTags(name) {
   const base = name.toLowerCase();
   const tags = [];
@@ -64,6 +61,12 @@ function App() {
   const [expandedTags, setExpandedTags] = useState({});
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
+  const [lightboxId, setLightboxId] = useState(null);
+
+  const lightboxIndex = lightboxId == null ? -1 : (reanchorIndex(photos, lightboxId) ?? -1);
+  useEffect(() => {
+    if (lightboxId != null && lightboxIndex < 0) setLightboxId(null);
+  }, [lightboxId, lightboxIndex]);
 
   async function load() {
     setError('');
@@ -170,7 +173,7 @@ function App() {
 
     <section className="searchCard">
       <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={t.searchPlaceholder} /></label>
-      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> {t.statsPhotos} · <b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmt(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
+      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> {t.statsPhotos} · <b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmtBytes(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
       <div className="chips">
         <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>{t.all}</button>
         {tags.slice(0, 8).map(tg => <button key={tg.name} className={tag === tg.name ? 'active' : ''} onClick={() => setTag(tg.name)}>{tg.name}</button>)}
@@ -182,10 +185,16 @@ function App() {
         const caption = pickLangField(p, lang, 'aiCaption');
         const photoTags = pickLangTags(p, lang);
         return <article key={p.id} className="photo">
-          <img src={p.url} loading="lazy" />
+          <button
+            className="photoOpen"
+            type="button"
+            onClick={() => setLightboxId(p.id)}
+          >
+            <img src={p.url} loading="lazy" alt={p.title} />
+          </button>
           <div className="photoInfo">
             <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
-            <div className="sub">{p.album} · {fmt(p.size)}</div>
+            <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
             {p.analysisStatus === 'pending' && <div className="pending">{t.pending}</div>}
             {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
             {!!photoTags.length && <div className="tagBlock"><span>{t.tagsLabel}</span><div className="miniTags">{(expandedTags[p.id] ? photoTags : photoTags.slice(0, 5)).map(tg => <button key={tg} onClick={() => setTag(tg)}>{tg}</button>)}{photoTags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? t.hide : t.moreSuffix(photoTags.length - 5)}</button>}</div></div>}
@@ -197,6 +206,17 @@ function App() {
     </section>
 
     <footer className="footer">{t.poweredBy} <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
+
+    {lightboxIndex >= 0 && (
+      <Lightbox
+        photos={photos}
+        index={lightboxIndex}
+        onClose={() => setLightboxId(null)}
+        onIndexChange={(i) => { const p = photos[i]; if (p) setLightboxId(p.id); }}
+        lang={lang}
+        t={t}
+      />
+    )}
   </main>;
 }
 

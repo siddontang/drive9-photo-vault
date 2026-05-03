@@ -27,6 +27,13 @@ export const COPY = {
     empty: 'No photos yet. Tap "Choose photos" to start.',
     poweredBy: 'Powered by',
     coachMark: 'Tap to switch · 切换语言',
+    details: 'Details',
+    close: 'Close',
+    previous: 'Previous photo',
+    next: 'Next photo',
+    info: 'Info',
+    photoCounter: (idx, total) => `${idx} / ${total}`,
+    noMetadata: 'No additional details',
     progressPreparing: (n) => `Preparing ${n} photo${n > 1 ? 's' : ''}…`,
     progressUploading: (name, idx, total) => `Uploading ${name} (${idx}/${total})…`,
     progressIndexing: (idx, total) => `Saving to drive9 and extracting image metadata (${idx}/${total})…`,
@@ -62,6 +69,13 @@ export const COPY = {
     empty: '还没有照片，点击 "选择照片" 开始。',
     poweredBy: '由',
     coachMark: '切换语言 · Tap to switch',
+    details: '详情',
+    close: '关闭',
+    previous: '上一张',
+    next: '下一张',
+    info: '详情',
+    photoCounter: (idx, total) => `${idx} / ${total}`,
+    noMetadata: '暂无更多信息',
     progressPreparing: (n) => `正在准备 ${n} 张照片…`,
     progressUploading: (name, idx, total) => `正在上传 ${name}（${idx}/${total}）…`,
     progressIndexing: (idx, total) => `正在写入 drive9 并提取图片信息（${idx}/${total}）…`,
@@ -89,6 +103,12 @@ export function useLang() {
   }, [lang]);
 
   return { lang, setLang, t: COPY[lang] };
+}
+
+export function fmtBytes(n = 0) {
+  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
 }
 
 export function pickLangField(photo, lang, key) {
