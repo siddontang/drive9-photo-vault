@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Heart, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
+import { useLang, pickLangField, pickLangTags } from './i18n';
 
 const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddontang.workers.dev';
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
@@ -21,7 +22,37 @@ function guessTags(name) {
   return tags.join(', ');
 }
 
+function LangSwitch({ lang, setLang, t }) {
+  const [showCoach, setShowCoach] = useState(() => !localStorage.photoVaultLangSeen);
+  const dismissedRef = useRef(false);
+  const dismiss = () => {
+    if (dismissedRef.current) return;
+    dismissedRef.current = true;
+    setShowCoach(false);
+    try { localStorage.photoVaultLangSeen = '1'; } catch {}
+  };
+  useEffect(() => {
+    if (!showCoach) return;
+    const id = setTimeout(dismiss, 6000);
+    return () => clearTimeout(id);
+  }, [showCoach]);
+
+  const onPick = (next) => {
+    setLang(next);
+    dismiss();
+  };
+
+  return <div className="langWrap">
+    <div className="langSwitch" role="group" aria-label="Language">
+      <button className={lang === 'en' ? 'on' : ''} aria-pressed={lang === 'en'} onClick={() => onPick('en')}>EN</button>
+      <button className={lang === 'zh' ? 'on' : ''} aria-pressed={lang === 'zh'} onClick={() => onPick('zh')}>中</button>
+    </div>
+    {showCoach && <button className="langCoach" onClick={dismiss}>{t.coachMark}</button>}
+  </div>;
+}
+
 function App() {
+  const { lang, setLang, t } = useLang();
   const [photos, setPhotos] = useState([]);
   const [collections, setCollections] = useState(null);
   const [q, setQ] = useState('');
@@ -47,25 +78,25 @@ function App() {
       setPhotos(p.photos || []);
       setCollections(c);
     } catch (e) {
-      setError(`Could not load photos: ${e.message || e}`);
+      setError(t.errorLoad(e.message || e));
       setTimeout(() => load(), 2500);
     }
   }
 
   useEffect(() => {
-    const t = setTimeout(load, 180);
-    return () => clearTimeout(t);
+    const tid = setTimeout(load, 180);
+    return () => clearTimeout(tid);
   }, [q, tag]);
 
   async function upload(files) {
     if (!files?.length) return;
     setBusy(true);
-    setProgress(`Preparing ${files.length} photo${files.length > 1 ? 's' : ''}…`);
+    setProgress(t.progressPreparing(files.length));
     setError('');
     try {
       let done = 0;
       for (const file of files) {
-        setProgress(`Uploading ${file.name} (${done + 1}/${files.length})…`);
+        setProgress(t.progressUploading(file.name, done + 1, files.length));
         const fd = new FormData();
         fd.set('file', file);
         fd.set('owner', owner);
@@ -74,21 +105,21 @@ function App() {
         fd.set('album', draft.album || 'Inbox');
         fd.set('note', draft.note || '');
         const res = await fetch(`${API}/api/photos`, { method: 'POST', body: fd });
-        setProgress(`Saving to drive9 and extracting image metadata (${done + 1}/${files.length})…`);
+        setProgress(t.progressIndexing(done + 1, files.length));
         if (!res.ok) throw new Error(await res.text());
         const payload = await res.json();
         if (payload?.photo?.analysisStatus === 'pending') {
-          setProgress(`Uploaded ${file.name}. drive9 is still analyzing; tags will appear after refresh.`);
+          setProgress(t.progressPending(file.name));
         } else {
-          setProgress(`Indexed ${file.name} (${done + 1}/${files.length})…`);
+          setProgress(t.progressIndexed(file.name, done + 1, files.length));
         }
         done++;
       }
       setDraft({ tags: '', album: 'Inbox', note: '' });
       setShowDetails(false);
-      setProgress('Refreshing library…');
+      setProgress(t.progressRefreshing);
       await load();
-      setProgress('Done');
+      setProgress(t.progressDone);
       setTimeout(() => setProgress(''), 1800);
     } catch (e) {
       setError(e.message || String(e));
@@ -113,52 +144,59 @@ function App() {
     <header className="topbar">
       <div>
         <h1>PhotoVault</h1>
-        <p>Upload. Search. Organize.</p>
+        <p>{t.tagline}</p>
       </div>
-      <a href={`${API}/openapi.json`} target="_blank">API</a>
+      <div className="topbarActions">
+        <LangSwitch lang={lang} setLang={setLang} t={t} />
+        <a href={`${API}/openapi.json`} target="_blank" rel="noreferrer">{t.api}</a>
+      </div>
     </header>
 
     <section className="uploadCard" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); upload(e.dataTransfer.files); }}>
       <label className="uploadButton picker">
         <Upload size={22} />
-        <span>{busy ? 'Working…' : 'Choose photos'}</span>
+        <span>{busy ? t.working : t.choose}</span>
         <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
       </label>
-      <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? 'Hide options' : 'Add tags / album'}</button>
+      <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? t.hideOptions : t.addOptions}</button>
       {showDetails && <div className="details">
-        <input placeholder="Tags, comma separated" value={draft.tags} onChange={e => setDraft({ ...draft, tags: e.target.value })} />
-        <input placeholder="Album" value={draft.album} onChange={e => setDraft({ ...draft, album: e.target.value })} />
-        <input className="wide" placeholder="Note" value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })} />
+        <input placeholder={t.placeholderTags} value={draft.tags} onChange={e => setDraft({ ...draft, tags: e.target.value })} />
+        <input placeholder={t.placeholderAlbum} value={draft.album} onChange={e => setDraft({ ...draft, album: e.target.value })} />
+        <input className="wide" placeholder={t.placeholderNote} value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })} />
       </div>}
       {progress && <div className={busy ? 'progress' : 'progress done'}>{progress}</div>}
       {error && <div className="error">{error}</div>}
     </section>
 
     <section className="searchCard">
-      <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search photos…" /></label>
-      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> photos · <b>{totals.favorites}</b> favorites · <b>{fmt(totals.bytes)}</b></div><button className="refresh" onClick={load}>Refresh</button></div>
+      <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={t.searchPlaceholder} /></label>
+      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> {t.statsPhotos} · <b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmt(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
       <div className="chips">
-        <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>All</button>
-        {tags.slice(0, 8).map(t => <button key={t.name} className={tag === t.name ? 'active' : ''} onClick={() => setTag(t.name)}>{t.name}</button>)}
+        <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>{t.all}</button>
+        {tags.slice(0, 8).map(tg => <button key={tg.name} className={tag === tg.name ? 'active' : ''} onClick={() => setTag(tg.name)}>{tg.name}</button>)}
       </div>
     </section>
 
     <section className="grid">
-      {photos.map(p => <article key={p.id} className="photo">
-        <img src={p.url} loading="lazy" />
-        <div className="photoInfo">
-          <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
-          <div className="sub">{p.album} · {fmt(p.size)}</div>
-          {p.analysisStatus === 'pending' && <div className="pending">drive9 analyzing… refresh/search again in a few seconds</div>}
-          {p.aiCaption && <div className="summaryBox"><div className="summaryHead"><b>Summary</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? 'show less' : 'show more'}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{p.aiCaption}</div></div>}
-          {!!p.tags.length && <div className="tagBlock"><span>Tags</span><div className="miniTags">{(expandedTags[p.id] ? p.tags : p.tags.slice(0, 5)).map(t => <button key={t} onClick={() => setTag(t)}>{t}</button>)}{p.tags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? 'hide' : `+${p.tags.length - 5} more`}</button>}</div></div>}
-          <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> Delete</button>
-        </div>
-      </article>)}
-      {!photos.length && <div className="empty">No photos yet. Tap “Choose photos” to start.</div>}
+      {photos.map(p => {
+        const caption = pickLangField(p, lang, 'aiCaption');
+        const photoTags = pickLangTags(p, lang);
+        return <article key={p.id} className="photo">
+          <img src={p.url} loading="lazy" />
+          <div className="photoInfo">
+            <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
+            <div className="sub">{p.album} · {fmt(p.size)}</div>
+            {p.analysisStatus === 'pending' && <div className="pending">{t.pending}</div>}
+            {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
+            {!!photoTags.length && <div className="tagBlock"><span>{t.tagsLabel}</span><div className="miniTags">{(expandedTags[p.id] ? photoTags : photoTags.slice(0, 5)).map(tg => <button key={tg} onClick={() => setTag(tg)}>{tg}</button>)}{photoTags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? t.hide : t.moreSuffix(photoTags.length - 5)}</button>}</div></div>}
+            <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> {t.delete}</button>
+          </div>
+        </article>;
+      })}
+      {!photos.length && <div className="empty">{t.empty}</div>}
     </section>
 
-    <footer className="footer">Powered by <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
+    <footer className="footer">{t.poweredBy} <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
   </main>;
 }
 

@@ -2,3 +2,22 @@
 .footer{text-align:center;color:#94a3b8;font-size:13px;margin:26px 0 4px}.footer a{color:#2563eb;font-weight:900;text-decoration:none}.footer a:hover{text-decoration:underline}
 .summaryBox{margin:8px 0 10px;border:1px solid #e2e8f0;background:#f8fafc;border-radius:12px;padding:8px 10px;color:#334155;font-size:13px;line-height:1.45}.summaryBox summary{cursor:pointer;color:#2563eb;font-weight:900;list-style:none}.summaryBox summary::-webkit-details-marker{display:none}.summaryBox summary:after{content:"show";float:right;color:#64748b;font-size:12px}.summaryBox[open] summary{margin-bottom:6px}.summaryBox[open] summary:after{content:"hide"}.summaryBox div{white-space:pre-wrap;word-break:break-word}
 .summaryBox{margin:8px 0 10px;border:1px solid #e2e8f0;background:#f8fafc;border-radius:12px;padding:8px 10px;color:#334155;font-size:13px;line-height:1.45}.summaryHead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:5px}.summaryHead b{color:#2563eb;font-size:13px}.summaryHead button{border:0;background:transparent;color:#64748b;font-size:12px;font-weight:900;padding:0;cursor:pointer}.summaryText{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word}.summaryText.expanded{display:block;-webkit-line-clamp:unset;overflow:visible}
+.topbarActions{display:flex;align-items:center;gap:10px}
+.langWrap{position:relative;display:inline-flex;align-items:center}
+.langSwitch{display:inline-flex;align-items:center;background:#eef2ff;border:1px solid rgba(15,23,42,.04);border-radius:999px;padding:3px;gap:0}
+.langSwitch button{border:0;background:transparent;color:#64748b;font-weight:800;font-size:12px;letter-spacing:.04em;padding:6px 11px;border-radius:999px;cursor:pointer;line-height:1;min-width:34px;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .12s ease}
+.langSwitch button:hover:not(.on){color:#0f172a}
+.langSwitch button:active{transform:scale(.97)}
+.langSwitch button.on{background:white;color:#0f172a;box-shadow:0 1px 2px rgba(15,23,42,.08),0 0 0 1px rgba(15,23,42,.04)}
+.langSwitch button:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.langCoach{position:absolute;top:calc(100% + 10px);right:0;background:rgba(15,23,42,.92);color:white;font-size:12px;font-weight:600;letter-spacing:.01em;padding:8px 12px;border-radius:10px;white-space:nowrap;cursor:pointer;border:0;box-shadow:0 8px 24px rgba(15,23,42,.18);backdrop-filter:saturate(140%) blur(6px);-webkit-backdrop-filter:saturate(140%) blur(6px);animation:coachIn .35s cubic-bezier(.2,.8,.2,1) both,coachFloat 2.4s ease-in-out infinite 1s;z-index:10}
+.langCoach::before{content:"";position:absolute;top:-5px;right:18px;width:10px;height:10px;background:rgba(15,23,42,.92);transform:rotate(45deg);border-radius:2px}
+.langCoach:hover{background:rgba(15,23,42,1)}
+.langCoach:hover::before{background:rgba(15,23,42,1)}
+@keyframes coachIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes coachFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+@media(prefers-reduced-motion:reduce){.langCoach{animation:none}}
+:root[lang="zh-Hans"]{font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC","HarmonyOS Sans SC","Microsoft YaHei",Inter,ui-sans-serif,system-ui,sans-serif}
+:root[lang="zh-Hans"] .topbar h1{letter-spacing:-.02em}
+:root[lang="zh-Hans"] .langSwitch button{font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+@media(max-width:420px){.topbarActions{gap:8px}.topbar a{padding:7px 11px;font-size:13px}}

@@ -1,13 +1,14 @@
+export type LangPair<T> = { zh: T; en: T };
+
 export type Drive9SemanticResult = {
-  caption: string;
-  text: string;
-  objects: string[];
-  tags: string[];
-  searchText: string;
+  caption: LangPair<string>;
+  text: LangPair<string>;
+  tags: LangPair<string[]>;
   status: string;
 };
 
 const DRIVE9_IMAGE_EN_TAG_RE = /^drive9\.image\.tag\.en\.(\d+)$/;
+const DRIVE9_IMAGE_ZH_TAG_RE = /^drive9\.image\.tag\.zh\.(\d+)$/;
 const MAX_TAGS = 30;
 const MAX_TAG_RUNES = 64;
 const MAX_CAPTION_LENGTH = 500;
@@ -40,7 +41,6 @@ const deniedDisplayTags = new Set([
 ]);
 
 const englishCaptionLabels = [
-  '英文摘要',
   'english caption',
   'english summary',
   'caption_en',
@@ -49,18 +49,18 @@ const englishCaptionLabels = [
   'en summary',
   'en.caption',
   'en.summary',
+  '英文摘要',
 ];
 
 const englishDescriptionLabels = [
-  '英文描述',
   'english description',
   'description_en',
   'en description',
   'en.description',
+  '英文描述',
 ];
 
 const englishTagLabels = [
-  '英文标签',
   'english tags',
   'english tag',
   'tags_en',
@@ -68,6 +68,38 @@ const englishTagLabels = [
   'en tags',
   'en tag',
   'en.tags',
+  '英文标签',
+];
+
+const chineseCaptionLabels = [
+  '中文摘要',
+  'chinese caption',
+  'chinese summary',
+  'caption_zh',
+  'summary_zh',
+  'zh caption',
+  'zh summary',
+  'zh.caption',
+  'zh.summary',
+];
+
+const chineseDescriptionLabels = [
+  '中文描述',
+  'chinese description',
+  'description_zh',
+  'zh description',
+  'zh.description',
+];
+
+const chineseTagLabels = [
+  '中文标签',
+  'chinese tags',
+  'chinese tag',
+  'tags_zh',
+  'tag_zh',
+  'zh tags',
+  'zh tag',
+  'zh.tags',
 ];
 
 export function buildDrive9SemanticResult(meta: unknown, existingTags: string[] = []): Drive9SemanticResult | null {
@@ -76,33 +108,48 @@ export function buildDrive9SemanticResult(meta: unknown, existingTags: string[] 
   const text = semanticTextToSearchText(meta.semantic_text);
   if (!text) return null;
 
-  const tags = tagsFromDrive9Meta(meta.tags, existingTags, meta.semantic_text);
+  const tagsEn = tagsEnFromDrive9Meta(meta.tags, existingTags, meta.semantic_text);
+  const tagsZh = tagsZhFromDrive9Meta(meta.tags, meta.semantic_text);
+  const captionEn = captionEnFromDrive9Semantic(meta.semantic_text);
+  const captionZh = captionZhFromDrive9Semantic(meta.semantic_text);
+  const textEn = textEnFromDrive9Semantic(meta.semantic_text);
+  const textZh = textZhFromDrive9Semantic(meta.semantic_text);
+
   return {
-    caption: captionFromDrive9Semantic(meta.semantic_text),
-    text,
-    objects: [],
-    tags,
-    searchText: [text, tags.join(' ')].filter(Boolean).join(' '),
+    caption: { zh: captionZh, en: captionEn },
+    text: { zh: textZh, en: textEn },
+    tags: { zh: tagsZh, en: tagsEn },
     status: 'drive9',
   };
 }
 
-export function captionFromDrive9Semantic(semanticValue: unknown): string {
+export function captionEnFromDrive9Semantic(semanticValue: unknown): string {
+  return captionForLang(semanticValue, 'en');
+}
+
+export function captionZhFromDrive9Semantic(semanticValue: unknown): string {
+  return captionForLang(semanticValue, 'zh');
+}
+
+function captionForLang(semanticValue: unknown, lang: 'zh' | 'en'): string {
   const obj = semanticObjectFromValue(semanticValue);
   if (obj) {
-    const fromObject = englishCaptionFromObject(obj);
+    const fromObject = captionFromObjectForLang(obj, lang);
     if (fromObject) return fromObject;
   }
 
   const text = typeof semanticValue === 'string' ? semanticValue : semanticTextToSearchText(semanticValue);
-  const caption = semanticLineValue(text, englishCaptionLabels);
+  const captionLabels = lang === 'zh' ? chineseCaptionLabels : englishCaptionLabels;
+  const descriptionLabels = lang === 'zh' ? chineseDescriptionLabels : englishDescriptionLabels;
+
+  const caption = semanticLineValue(text, captionLabels);
   if (caption) return cleanCaption(caption);
 
-  const description = semanticLineValue(text, englishDescriptionLabels);
+  const description = semanticLineValue(text, descriptionLabels);
   return description ? firstSentence(cleanCaption(description)) : '';
 }
 
-export function tagsFromDrive9Meta(tagsMeta: unknown, existingTags: string[] = [], semanticValue?: unknown): string[] {
+export function tagsEnFromDrive9Meta(tagsMeta: unknown, existingTags: string[] = [], semanticValue?: unknown): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const addTag = (raw: unknown, lowercase = false) => {
@@ -116,9 +163,27 @@ export function tagsFromDrive9Meta(tagsMeta: unknown, existingTags: string[] = [
 
   for (const tag of existingTags) addTag(tag);
 
-  const driveTags = drive9ImageEnglishTags(tagsMeta);
-  const semanticTags = driveTags.length ? driveTags : englishTagsFromSemantic(semanticValue);
+  const driveTags = drive9ImageTagsByLang(tagsMeta, 'en');
+  const semanticTags = driveTags.length ? driveTags : tagsFromSemanticForLang(semanticValue, 'en');
   for (const tag of semanticTags) addTag(tag, true);
+
+  return out.slice(0, MAX_TAGS);
+}
+
+export function tagsZhFromDrive9Meta(tagsMeta: unknown, semanticValue?: unknown): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const addTag = (raw: unknown) => {
+    const tag = cleanDisplayTag(raw, false);
+    if (!tag) return;
+    if (seen.has(tag)) return;
+    seen.add(tag);
+    out.push(tag);
+  };
+
+  const driveTags = drive9ImageTagsByLang(tagsMeta, 'zh');
+  const semanticTags = driveTags.length ? driveTags : tagsFromSemanticForLang(semanticValue, 'zh');
+  for (const tag of semanticTags) addTag(tag);
 
   return out.slice(0, MAX_TAGS);
 }
@@ -134,12 +199,52 @@ export function semanticTextToSearchText(value: unknown): string {
   return typeof value === 'string' ? cleanText(value) : '';
 }
 
-function drive9ImageEnglishTags(tagsMeta: unknown): string[] {
+function textEnFromDrive9Semantic(semanticValue: unknown): string {
+  return langTextFromSemantic(semanticValue, 'en');
+}
+
+function textZhFromDrive9Semantic(semanticValue: unknown): string {
+  return langTextFromSemantic(semanticValue, 'zh');
+}
+
+function langTextFromSemantic(semanticValue: unknown, lang: 'zh' | 'en'): string {
+  const obj = semanticObjectFromValue(semanticValue);
+  if (obj) {
+    const structured = structuredSemanticObjectToTextForLang(obj, lang);
+    if (structured) return structured;
+  }
+
+  const text = typeof semanticValue === 'string' ? cleanText(semanticValue) : semanticTextToSearchText(semanticValue);
+  return text ? extractLangLines(text, lang) : '';
+}
+
+function extractLangLines(text: string, lang: 'zh' | 'en'): string {
+  const captionLabels = new Set((lang === 'zh' ? chineseCaptionLabels : englishCaptionLabels).map(normalizeLabel));
+  const descriptionLabels = new Set((lang === 'zh' ? chineseDescriptionLabels : englishDescriptionLabels).map(normalizeLabel));
+  const tagLabels = new Set((lang === 'zh' ? chineseTagLabels : englishTagLabels).map(normalizeLabel));
+  const queryLabels = new Set((lang === 'zh' ? ['中文搜索短语'] : ['英文搜索短语']).map(normalizeLabel));
+  const ocrLabels = new Set(['图中文字', '图中可见文字', 'ocr', 'ocr_text'].map(normalizeLabel));
+  const wanted = new Set([...captionLabels, ...descriptionLabels, ...tagLabels, ...queryLabels, ...ocrLabels]);
+
+  const out: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/\*\*/g, '').replace(/^[\s#>*-]+/, '').trim();
+    const idx = firstColonIndex(line);
+    if (idx < 0) continue;
+
+    const label = normalizeLabel(line.slice(0, idx));
+    if (wanted.has(label)) out.push(line);
+  }
+  return out.join('\n').trim();
+}
+
+function drive9ImageTagsByLang(tagsMeta: unknown, lang: 'zh' | 'en'): string[] {
   if (!isRecord(tagsMeta)) return [];
 
+  const re = lang === 'zh' ? DRIVE9_IMAGE_ZH_TAG_RE : DRIVE9_IMAGE_EN_TAG_RE;
   const tags: Array<{ order: number; value: string }> = [];
   for (const [key, value] of Object.entries(tagsMeta)) {
-    const match = key.match(DRIVE9_IMAGE_EN_TAG_RE);
+    const match = key.match(re);
     if (!match) continue;
 
     const order = Number(match[1]);
@@ -153,52 +258,68 @@ function drive9ImageEnglishTags(tagsMeta: unknown): string[] {
     .map((tag) => tag.value);
 }
 
-function englishTagsFromSemantic(semanticValue: unknown): string[] {
+function tagsFromSemanticForLang(semanticValue: unknown, lang: 'zh' | 'en'): string[] {
   const obj = semanticObjectFromValue(semanticValue);
   if (obj) {
-    const en = firstRecord(obj, ['en', 'english']);
-    const tags = firstTagList(obj, ['tags_en', 'english_tags']) || (en ? firstTagList(en, ['tags', 'tag']) : null);
+    const langKey = lang === 'zh' ? ['zh', 'chinese'] : ['en', 'english'];
+    const langObj = firstRecord(obj, langKey);
+    const flatKeys = lang === 'zh' ? ['tags_zh', 'chinese_tags'] : ['tags_en', 'english_tags'];
+    const tags = firstTagList(obj, flatKeys) || (langObj ? firstTagList(langObj, ['tags', 'tag']) : null);
     if (tags?.length) return tags;
   }
 
   const text = typeof semanticValue === 'string' ? semanticValue : semanticTextToSearchText(semanticValue);
-  const line = semanticLineValue(text, englishTagLabels);
+  const labels = lang === 'zh' ? chineseTagLabels : englishTagLabels;
+  const line = semanticLineValue(text, labels);
   return line ? splitTagLine(line) : [];
 }
 
-function englishCaptionFromObject(obj: Record<string, unknown>): string {
-  const en = firstRecord(obj, ['en', 'english']);
-  const caption = firstString(obj, ['caption_en', 'summary_en', 'english_caption', 'english_summary'])
-    || (en ? firstString(en, ['caption', 'summary']) : '')
-    || firstString(obj, ['en', 'english']);
+function captionFromObjectForLang(obj: Record<string, unknown>, lang: 'zh' | 'en'): string {
+  const langObj = firstRecord(obj, lang === 'zh' ? ['zh', 'chinese'] : ['en', 'english']);
+  const captionKeys = lang === 'zh'
+    ? ['caption_zh', 'summary_zh', 'chinese_caption', 'chinese_summary']
+    : ['caption_en', 'summary_en', 'english_caption', 'english_summary'];
+  const flatStringKeys = lang === 'zh' ? ['zh', 'chinese'] : ['en', 'english'];
+  const caption = firstString(obj, captionKeys)
+    || (langObj ? firstString(langObj, ['caption', 'summary']) : '')
+    || firstString(obj, flatStringKeys);
   if (caption) return cleanCaption(caption);
 
-  const description = firstString(obj, ['description_en', 'english_description'])
-    || (en ? firstString(en, ['description']) : '');
+  const descriptionKeys = lang === 'zh' ? ['description_zh', 'chinese_description'] : ['description_en', 'english_description'];
+  const description = firstString(obj, descriptionKeys)
+    || (langObj ? firstString(langObj, ['description']) : '');
   return description ? firstSentence(cleanCaption(description)) : '';
 }
 
 function structuredSemanticObjectToText(obj: Record<string, unknown>): string {
-  const zh = firstRecord(obj, ['zh', 'chinese']);
-  const en = firstRecord(obj, ['en', 'english']);
+  const zhText = structuredSemanticObjectToTextForLang(obj, 'zh');
+  const enText = structuredSemanticObjectToTextForLang(obj, 'en');
+  return [zhText, enText].filter(Boolean).join('\n').trim();
+}
+
+function structuredSemanticObjectToTextForLang(obj: Record<string, unknown>, lang: 'zh' | 'en'): string {
+  const langObj = firstRecord(obj, lang === 'zh' ? ['zh', 'chinese'] : ['en', 'english']);
   const lines: string[] = [];
   const addLine = (label: string, value: string | string[]) => {
     if (Array.isArray(value)) {
-      if (value.length) lines.push(`${label}：${value.join(label.includes('英文') ? ', ' : '；')}`);
+      if (value.length) lines.push(`${label}：${value.join(lang === 'en' ? ', ' : '；')}`);
       return;
     }
     if (value) lines.push(`${label}：${value}`);
   };
 
-  addLine('中文摘要', firstString(obj, ['caption_zh', 'summary_zh']) || (zh ? firstString(zh, ['caption', 'summary']) : ''));
-  addLine('中文描述', firstString(obj, ['description_zh']) || (zh ? firstString(zh, ['description']) : ''));
-  addLine('英文摘要', firstString(obj, ['caption_en', 'summary_en']) || (en ? firstString(en, ['caption', 'summary']) : '') || firstString(obj, ['en', 'english']));
-  addLine('英文描述', firstString(obj, ['description_en']) || (en ? firstString(en, ['description']) : ''));
+  if (lang === 'zh') {
+    addLine('中文摘要', firstString(obj, ['caption_zh', 'summary_zh']) || (langObj ? firstString(langObj, ['caption', 'summary']) : ''));
+    addLine('中文描述', firstString(obj, ['description_zh']) || (langObj ? firstString(langObj, ['description']) : ''));
+    addLine('中文标签', firstTagList(obj, ['tags_zh']) || (langObj ? firstTagList(langObj, ['tags']) : null) || []);
+    addLine('中文搜索短语', firstList(obj, ['search_queries_zh', 'queries_zh']) || (langObj ? firstList(langObj, ['search_queries', 'queries']) : null) || []);
+  } else {
+    addLine('英文摘要', firstString(obj, ['caption_en', 'summary_en']) || (langObj ? firstString(langObj, ['caption', 'summary']) : '') || firstString(obj, ['en', 'english']));
+    addLine('英文描述', firstString(obj, ['description_en']) || (langObj ? firstString(langObj, ['description']) : ''));
+    addLine('英文标签', firstTagList(obj, ['tags_en']) || (langObj ? firstTagList(langObj, ['tags']) : null) || []);
+    addLine('英文搜索短语', firstList(obj, ['search_queries_en', 'queries_en']) || (langObj ? firstList(langObj, ['search_queries', 'queries']) : null) || []);
+  }
   addLine('图中文字', firstList(obj, ['ocr_text', 'ocr']) || []);
-  addLine('中文标签', firstTagList(obj, ['tags_zh']) || (zh ? firstTagList(zh, ['tags']) : null) || []);
-  addLine('英文标签', firstTagList(obj, ['tags_en']) || (en ? firstTagList(en, ['tags']) : null) || []);
-  addLine('中文搜索短语', firstList(obj, ['search_queries_zh', 'queries_zh']) || (zh ? firstList(zh, ['search_queries', 'queries']) : null) || []);
-  addLine('英文搜索短语', firstList(obj, ['search_queries_en', 'queries_en']) || (en ? firstList(en, ['search_queries', 'queries']) : null) || []);
 
   return lines.join('\n').trim();
 }
@@ -219,7 +340,7 @@ function semanticObjectFromValue(value: unknown): Record<string, unknown> | null
 }
 
 function jsonObjectCandidate(raw: string): string {
-  let text = cleanText(raw).replace(/^\ufeff/, '').trim();
+  let text = cleanText(raw).replace(/^﻿/, '').trim();
   if (!text) return '';
 
   if (text.startsWith('```')) {
@@ -284,7 +405,7 @@ function cleanCaption(value: string): string {
 }
 
 function firstSentence(value: string): string {
-  const sentence = value.match(/^.{1,500}?[.!?](?:\s|$)/u)?.[0];
+  const sentence = value.match(/^.{1,500}?[.!?。！？](?:\s|$)/u)?.[0];
   return (sentence || value).slice(0, MAX_CAPTION_LENGTH).trim();
 }
 

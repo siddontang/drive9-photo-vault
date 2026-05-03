@@ -22,10 +22,12 @@ type Photo = {
   updatedAt: string;
   width?: number;
   height?: number;
-  aiCaption?: string;
-  aiText?: string;
-  aiObjects?: string[];
-  searchText?: string;
+  aiCaptionEn?: string;
+  aiCaptionZh?: string;
+  aiTextEn?: string;
+  aiTextZh?: string;
+  aiTagsEn?: string[];
+  aiTagsZh?: string[];
   analysisStatus?: string;
 };
 
@@ -43,7 +45,8 @@ type PhotoIndexItem = {
   createdAt: string;
   updatedAt: string;
   tags: string[];
-  aiCaption?: string;
+  aiCaptionEn?: string;
+  aiCaptionZh?: string;
   analysisStatus?: string;
 };
 
@@ -126,10 +129,12 @@ function photoFromIndexItem(x: PhotoIndexItem | Photo): Photo {
     archived: !!x.archived,
     createdAt: x.createdAt,
     updatedAt: x.updatedAt,
-    aiCaption: x.aiCaption || '',
-    aiText: (x as Photo).aiText || '',
-    aiObjects: (x as Photo).aiObjects || [],
-    searchText: (x as Photo).searchText || [x.title, x.album, (x.tags || []).join(' '), x.aiCaption || ''].join(' '),
+    aiCaptionEn: x.aiCaptionEn || '',
+    aiCaptionZh: x.aiCaptionZh || '',
+    aiTextEn: (x as Photo).aiTextEn || '',
+    aiTextZh: (x as Photo).aiTextZh || '',
+    aiTagsEn: (x as Photo).aiTagsEn || [],
+    aiTagsZh: (x as Photo).aiTagsZh || [],
     analysisStatus: x.analysisStatus || (x as Photo).analysisStatus,
   };
 }
@@ -172,24 +177,31 @@ function compactPhotoForIndex(p: Photo): PhotoIndexItem {
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     tags: [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 6),
-    aiCaption: (p.aiCaption || '').slice(0, 140),
+    aiCaptionEn: (p.aiCaptionEn || '').slice(0, 140),
+    aiCaptionZh: (p.aiCaptionZh || '').slice(0, 140),
     analysisStatus: p.analysisStatus,
   };
 }
 function compactPhotoMeta(p: Photo): Photo {
-  const caption = (p.aiCaption || '').slice(0, 500);
-  const text = (p.aiText || '').slice(0, 2200);
+  const captionEn = (p.aiCaptionEn || '').slice(0, 500);
+  const captionZh = (p.aiCaptionZh || '').slice(0, 500);
+  const textEn = (p.aiTextEn || '').slice(0, 1100);
+  const textZh = (p.aiTextZh || '').slice(0, 1100);
   const tags = [...new Set((p.tags || []).map(String).filter(Boolean))].slice(0, 24);
+  const tagsEn = [...new Set((p.aiTagsEn || []).map(String).filter(Boolean))].slice(0, 24);
+  const tagsZh = [...new Set((p.aiTagsZh || []).map(String).filter(Boolean))].slice(0, 24);
   return {
     ...p,
     title: (p.title || '').slice(0, 160),
     note: (p.note || '').slice(0, 500),
     album: (p.album || 'Inbox').slice(0, 80),
     tags,
-    aiCaption: caption,
-    aiText: text,
-    aiObjects: (p.aiObjects || []).slice(0, 20),
-    searchText: [p.title, p.note, p.album, caption, text, tags.join(' ')].join(' ').slice(0, 2600),
+    aiCaptionEn: captionEn,
+    aiCaptionZh: captionZh,
+    aiTextEn: textEn,
+    aiTextZh: textZh,
+    aiTagsEn: tagsEn,
+    aiTagsZh: tagsZh,
   };
 }
 async function setIndex(env: Env, photos: (Photo | PhotoIndexItem)[]) {
@@ -214,18 +226,24 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
   let checked = 0;
   for (const p of photos) {
     if (checked >= limit) break;
-    const needs = !p.aiText || p.aiCaption?.includes('still analyzing') || p.tags.length <= 2;
+    const needs = (!p.aiTextEn && !p.aiTextZh) || p.analysisStatus === 'pending';
     if (!needs || p.archived) continue;
     checked++;
     const analysis = await getDrive9Semantic(env, p.objectKey, p.tags);
-    if (analysis.text) {
-      p.aiCaption = analysis.caption;
-      p.aiText = analysis.text.slice(0, 220);
-      p.aiObjects = analysis.objects;
-      p.tags = analysis.tags.length ? analysis.tags : p.tags;
-      p.searchText = analysis.searchText.slice(0, 500);
+    if (analysis.text.en || analysis.text.zh) {
+      p.aiCaptionEn = analysis.caption.en;
+      p.aiCaptionZh = analysis.caption.zh;
+      p.aiTextEn = analysis.text.en.slice(0, 1100);
+      p.aiTextZh = analysis.text.zh.slice(0, 1100);
+      p.aiTagsEn = analysis.tags.en;
+      p.aiTagsZh = analysis.tags.zh;
+      p.tags = analysis.tags.en.length ? analysis.tags.en : p.tags;
       p.analysisStatus = analysis.status;
       p.updatedAt = new Date().toISOString();
+      changed = true;
+    } else if (analysis.status === 'pending' && !p.analysisStatus) {
+      p.aiCaptionEn = analysis.caption.en;
+      p.analysisStatus = 'pending';
       changed = true;
     }
   }
@@ -240,7 +258,12 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
 
 function scorePhoto(photo: Photo, q: string) {
   if (!q) return 1;
-  const hay = [photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner, photo.aiCaption || '', photo.aiText || '', (photo.aiObjects || []).join(' '), photo.searchText || ''].join(' ').toLowerCase();
+  const hay = [
+    photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner,
+    photo.aiCaptionEn || '', photo.aiCaptionZh || '',
+    photo.aiTextEn || '', photo.aiTextZh || '',
+    (photo.aiTagsEn || []).join(' '), (photo.aiTagsZh || []).join(' '),
+  ].join(' ').toLowerCase();
   const words = tokenize(q);
   if (!words.length) return 1;
   return words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0) / words.length;
@@ -257,7 +280,12 @@ async function getDrive9Semantic(env: Env, path: string, existingTags: string[])
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  return { caption: 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.', text: '', objects: [] as string[], tags: existingTags, searchText: existingTags.join(' '), status: 'pending' };
+  return {
+    caption: { zh: '', en: 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.' },
+    text: { zh: '', en: '' },
+    tags: { zh: [] as string[], en: [] as string[] },
+    status: 'pending',
+  };
 }
 type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
 type Drive9PresignedPart = { number: number; url: string; size: number; headers?: Record<string, string> };
@@ -383,7 +411,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         owner: String(form.get('owner') || 'guest'),
         title: String(form.get('title') || file.name.replace(/\.[^.]+$/, '') || 'Untitled photo'),
         note: String(form.get('note') || ''),
-        tags: analysis.tags.length ? analysis.tags : tags,
+        tags: analysis.tags.en.length ? analysis.tags.en : tags,
         album: String(form.get('album') || 'Inbox'),
         mime: file.type,
         size: file.size,
@@ -393,10 +421,12 @@ async function handle(req: Request, env: Env): Promise<Response> {
         archived: false,
         createdAt: now,
         updatedAt: now,
-        aiCaption: analysis.caption,
-        aiText: analysis.text,
-        aiObjects: analysis.objects,
-        searchText: analysis.searchText,
+        aiCaptionEn: analysis.caption.en,
+        aiCaptionZh: analysis.caption.zh,
+        aiTextEn: analysis.text.en,
+        aiTextZh: analysis.text.zh,
+        aiTagsEn: analysis.tags.en,
+        aiTagsZh: analysis.tags.zh,
         analysisStatus: analysis.status,
       };
       const photos = await getAllPhotos(env);
@@ -404,7 +434,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       photos.unshift(photo);
       await setPhotoMeta(env, photo);
       await setIndex(env, photos);
-      return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9', analysis: { caption: photo.aiCaption, text: photo.aiText, objects: photo.aiObjects } }, { status: 201 });
+      return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
     }
     const fileMatch = path.match(/^\/api\/photos\/([^/]+)\/file$/);
     if (fileMatch && req.method === 'GET') {
