@@ -158,9 +158,7 @@ async function getPhotoMeta(env: Env, item: PhotoIndexItem): Promise<Photo> {
 }
 async function getAllPhotos(env: Env): Promise<Photo[]> {
   const items = await getIndexItems(env);
-  const out: Photo[] = [];
-  for (const item of items) out.push(await getPhotoMeta(env, item));
-  return out;
+  return Promise.all(items.map((item) => getPhotoMeta(env, item)));
 }
 function compactPhotoForIndex(p: Photo): PhotoIndexItem {
   return {
