@@ -35,15 +35,22 @@ function normalizeTags(values) {
     .filter(Boolean))].slice(0, 24);
 }
 
-function TagEditor({ photo, tags, addDraft, t, onFilter, onAddDraft, onAdd, onRemove, expanded, onToggleExpanded }) {
+function TagEditor({ photo, tags, addDraft, removing, t, onFilter, onAddDraft, onAdd, onRemove, onToggleRemove, expanded, onToggleExpanded }) {
   const visible = expanded ? tags : tags.slice(0, 5);
   const isAdding = Object.prototype.hasOwnProperty.call(addDraft, photo.id);
+  const isRemoving = !!removing[photo.id];
   return <div className="tagBlock tagManager">
-    <div className="tagBlockHead"><span>{t.tagsLabel}</span><button className="addTagBtn" onClick={() => onAddDraft(photo.id, '')} aria-label={t.addTag}>+ {t.addTag}</button></div>
-    <div className="miniTags editableTags">
+    <div className="tagBlockHead">
+      <span>{t.tagsLabel}</span>
+      <div className="tagHeadActions">
+        <button className="addTagBtn" onClick={() => onAddDraft(photo.id, '')} aria-label={t.addTag}>+ {t.addTag}</button>
+        {!!tags.length && <button className={isRemoving ? 'removeModeBtn on' : 'removeModeBtn'} onClick={() => onToggleRemove(photo.id)}>{isRemoving ? t.done : t.manageTags}</button>}
+      </div>
+    </div>
+    <div className={isRemoving ? 'miniTags editableTags removing' : 'miniTags editableTags'}>
       {visible.map(tg => <span className="editableTag" key={tg}>
         <button className="tagName" onClick={() => onFilter(tg)}>{tg}</button>
-        <button className="tagRemove" onClick={() => onRemove(photo.id, tags, tg)} aria-label={t.removeTag(tg)}>−</button>
+        {isRemoving && <button className="tagRemove" onClick={() => onRemove(photo.id, tags, tg)} aria-label={t.removeTag(tg)}>−</button>}
       </span>)}
       {tags.length > 5 && <button className="moreTag" onClick={onToggleExpanded}>{expanded ? t.hide : t.moreSuffix(tags.length - 5)}</button>}
       {!tags.length && !isAdding && <span className="noTags">{t.noTags}</span>}
@@ -103,6 +110,7 @@ function App() {
   const [showDetails, setShowDetails] = useState(false);
   const [expandedTags, setExpandedTags] = useState({});
   const [addTagDraft, setAddTagDraft] = useState({});
+  const [removingTags, setRemovingTags] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
   const [lightboxId, setLightboxId] = useState(null);
 
@@ -202,6 +210,9 @@ function App() {
       setError(e.message || String(e));
     }
   }
+  function toggleRemoveTags(id) {
+    setRemovingTags({ ...removingTags, [id]: !removingTags[id] });
+  }
   async function remove(id) {
     await fetch(`${API}/api/photos/${id}`, { method: 'DELETE' });
     await load();
@@ -271,11 +282,13 @@ function App() {
               photo={p}
               tags={photoTags}
               addDraft={addTagDraft}
+              removing={removingTags}
               t={t}
               onFilter={setTag}
               onAddDraft={setTagDraft}
               onAdd={addPhotoTags}
               onRemove={removePhotoTag}
+              onToggleRemove={toggleRemoveTags}
               expanded={!!expandedTags[p.id]}
               onToggleExpanded={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}
             />
