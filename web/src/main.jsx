@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { Heart, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
-import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
+import { useLang, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
 
@@ -103,7 +103,6 @@ function App() {
   const [showDetails, setShowDetails] = useState(false);
   const [expandedTags, setExpandedTags] = useState({});
   const [addTagDraft, setAddTagDraft] = useState({});
-  const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
   const [lightboxId, setLightboxId] = useState(null);
 
@@ -250,7 +249,6 @@ function App() {
 
     <section className="grid">
       {photos.map(p => {
-        const caption = pickLangField(p, lang, 'aiCaption');
         const photoTags = pickLangTags(p, lang);
         return <article key={p.id} className="photo">
           <button
@@ -269,7 +267,6 @@ function App() {
             <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
             <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
             {p.analysisStatus === 'pending' && <div className="pending">{t.pending}</div>}
-            {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
             <TagEditor
               photo={p}
               tags={photoTags}
