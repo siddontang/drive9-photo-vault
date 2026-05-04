@@ -23,6 +23,11 @@ export const COPY = {
     hide: 'hide',
     moreSuffix: (n) => `+${n} more`,
     delete: 'Delete',
+    editTags: 'Edit tags',
+    saveTags: 'Save',
+    cancel: 'Cancel',
+    tagEditorPlaceholder: 'Add / edit tags, comma separated',
+    noTags: 'No tags yet',
     pending: 'drive9 analyzing… refresh/search again in a few seconds',
     empty: 'No photos yet. Tap "Choose photos" to start.',
     poweredBy: 'Powered by',
@@ -65,6 +70,11 @@ export const COPY = {
     hide: '收起',
     moreSuffix: (n) => `还有 ${n} 项`,
     delete: '删除',
+    editTags: '编辑标签',
+    saveTags: '保存',
+    cancel: '取消',
+    tagEditorPlaceholder: '添加 / 修改标签，用逗号分隔',
+    noTags: '暂无标签',
     pending: 'drive9 正在分析… 几秒后刷新或再次搜索即可看到结果',
     empty: '还没有照片，点击 "选择照片" 开始。',
     poweredBy: '由',
@@ -126,9 +136,11 @@ export function pickLangField(photo, lang, key) {
 }
 
 export function pickLangTags(photo, lang) {
+  const manual = Array.isArray(photo.tags) ? photo.tags.filter(Boolean) : [];
+  if (manual.length) return [...new Set(manual)];
   const primary = lang === 'zh' ? photo.aiTagsZh : photo.aiTagsEn;
   const fallback = lang === 'zh' ? photo.aiTagsEn : photo.aiTagsZh;
-  if (primary && primary.length) return primary;
-  if (fallback && fallback.length) return fallback;
-  return photo.tags || [];
+  if (primary && primary.length) return [...new Set(primary.filter(Boolean))];
+  if (fallback && fallback.length) return [...new Set(fallback.filter(Boolean))];
+  return [];
 }

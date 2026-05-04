@@ -92,3 +92,12 @@
   .lightboxBackdrop,.lightboxImage{animation:none}
   .lightboxInfo{transition:none}
 }
+.tagBlockHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.tagBlockHead>span{color:#64748b;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.tagBlockHead button{border:0;background:transparent;color:#2563eb;font-size:12px;font-weight:900;padding:0;cursor:pointer;white-space:nowrap}
+.tagEditor input{font-size:13px;padding:10px;border-radius:12px}
+.tagActions{display:flex;gap:8px;margin-top:8px}
+.tagActions button{border:0;border-radius:999px;padding:7px 11px;font-size:12px;font-weight:900;cursor:pointer}
+.saveTag{background:#2563eb;color:white}
+.cancelTag{background:#f1f5f9;color:#64748b}
+.noTags{font-size:12px;color:#94a3b8;font-style:italic}

@@ -1,0 +1,10 @@
+{
+  "name": "PhotoVault Drive9 Demo",
+  "short_name": "PhotoVault",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "theme_color": "#2563eb",
+  "background_color": "#f6f7fb",
+  "display": "standalone"
+}

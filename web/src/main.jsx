@@ -28,6 +28,36 @@ function guessTags(name) {
   return tags.join(', ');
 }
 
+function parseTags(value) {
+  return [...new Set(String(value || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean))].slice(0, 24);
+}
+
+function TagEditor({ photo, tags, editing, draftValue, t, onFilter, onEdit, onDraft, onSave, onCancel, expanded, onToggleExpanded }) {
+  const visible = expanded ? tags : tags.slice(0, 5);
+  if (editing) {
+    return <div className="tagBlock tagEditor">
+      <span>{t.tagsLabel}</span>
+      <input
+        value={draftValue}
+        onChange={(e) => onDraft(e.target.value)}
+        placeholder={t.tagEditorPlaceholder}
+        autoFocus
+      />
+      <div className="tagActions">
+        <button className="saveTag" onClick={onSave}>{t.saveTags}</button>
+        <button className="cancelTag" onClick={onCancel}>{t.cancel}</button>
+      </div>
+    </div>;
+  }
+  return <div className="tagBlock">
+    <div className="tagBlockHead"><span>{t.tagsLabel}</span><button onClick={() => onEdit(photo.id, tags)}>{t.editTags}</button></div>
+    {tags.length ? <div className="miniTags">{visible.map(tg => <button key={tg} onClick={() => onFilter(tg)}>{tg}</button>)}{tags.length > 5 && <button className="moreTag" onClick={onToggleExpanded}>{expanded ? t.hide : t.moreSuffix(tags.length - 5)}</button>}</div> : <div className="noTags">{t.noTags}</div>}
+  </div>;
+}
+
 function LangSwitch({ lang, setLang, t }) {
   const [showCoach, setShowCoach] = useState(() => !localStorage.photoVaultLangSeen);
   const dismissedRef = useRef(false);
@@ -68,6 +98,7 @@ function App() {
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const [expandedTags, setExpandedTags] = useState({});
+  const [editingTags, setEditingTags] = useState({});
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
   const [lightboxId, setLightboxId] = useState(null);
@@ -141,8 +172,22 @@ function App() {
   }
 
   async function patch(id, body) {
-    await fetch(`${API}/api/photos/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await fetch(`${API}/api/photos/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(await res.text());
     await load();
+  }
+  function beginEditTags(id, tags) {
+    setEditingTags({ ...editingTags, [id]: tags.join(', ') });
+  }
+  async function saveTags(id) {
+    try {
+      setError('');
+      const tags = parseTags(editingTags[id]);
+      await patch(id, { tags });
+      setEditingTags(({ [id]: _removed, ...rest }) => rest);
+    } catch (e) {
+      setError(e.message || String(e));
+    }
   }
   async function remove(id) {
     await fetch(`${API}/api/photos/${id}`, { method: 'DELETE' });
@@ -211,7 +256,20 @@ function App() {
             <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
             {p.analysisStatus === 'pending' && <div className="pending">{t.pending}</div>}
             {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
-            {!!photoTags.length && <div className="tagBlock"><span>{t.tagsLabel}</span><div className="miniTags">{(expandedTags[p.id] ? photoTags : photoTags.slice(0, 5)).map(tg => <button key={tg} onClick={() => setTag(tg)}>{tg}</button>)}{photoTags.length > 5 && <button className="moreTag" onClick={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}>{expandedTags[p.id] ? t.hide : t.moreSuffix(photoTags.length - 5)}</button>}</div></div>}
+            <TagEditor
+              photo={p}
+              tags={photoTags}
+              editing={Object.prototype.hasOwnProperty.call(editingTags, p.id)}
+              draftValue={editingTags[p.id] || ''}
+              t={t}
+              onFilter={setTag}
+              onEdit={beginEditTags}
+              onDraft={(value) => setEditingTags({ ...editingTags, [p.id]: value })}
+              onSave={() => saveTags(p.id)}
+              onCancel={() => setEditingTags(({ [p.id]: _removed, ...rest }) => rest)}
+              expanded={!!expandedTags[p.id]}
+              onToggleExpanded={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}
+            />
             <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> {t.delete}</button>
           </div>
         </article>;
