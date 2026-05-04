@@ -19,6 +19,21 @@
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
+
+# Keep browser traffic same-origin. Netlify proxies API calls to the Cloudflare Worker,
+# avoiding direct browser dependency on workers.dev in regions where it is unreliable.
+[[redirects]]
+  from = "/api/*"
+  to = "https://drive9-photo-api.siddontang.workers.dev/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/openapi.json"
+  to = "https://drive9-photo-api.siddontang.workers.dev/openapi.json"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

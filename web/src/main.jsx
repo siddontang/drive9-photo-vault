@@ -7,7 +7,8 @@ import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
 
-const API = import.meta.env.VITE_API_BASE || 'https://drive9-photo-api.siddontang.workers.dev';
+const API = import.meta.env.VITE_API_BASE || '';
+const apiUrl = (path) => `${API}${path}`;
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
 
 function withViewTransition(update) {
@@ -127,10 +128,10 @@ function App() {
     if (tag) params.set('tag', tag);
     try {
       const [p, c] = await Promise.all([
-        fetch(`${API}/api/photos?${params}`, { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
-        fetch(`${API}/api/collections`, { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+        fetch(apiUrl(`/api/photos?${params}`), { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
+        fetch(apiUrl('/api/collections'), { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
       ]);
-      setPhotos(p.photos || []);
+      setPhotos((p.photos || []).map((photo) => ({ ...photo, url: apiUrl(`/api/photos/${photo.id}/file`) })));
       setCollections(c);
     } catch (e) {
       setError(t.errorLoad(e.message || e));
@@ -159,7 +160,7 @@ function App() {
         fd.set('tags', draft.tags || guessTags(file.name));
         fd.set('album', 'Inbox');
         fd.set('note', '');
-        const res = await fetch(`${API}/api/photos`, { method: 'POST', body: fd });
+        const res = await fetch(apiUrl('/api/photos'), { method: 'POST', body: fd });
         setProgress(t.progressIndexing(done + 1, files.length));
         if (!res.ok) throw new Error(await res.text());
         const payload = await res.json();
@@ -184,7 +185,7 @@ function App() {
   }
 
   async function patch(id, body) {
-    const res = await fetch(`${API}/api/photos/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await fetch(apiUrl(`/api/photos/${id}`), { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(await res.text());
     await load();
   }
@@ -215,7 +216,7 @@ function App() {
     setRemovingTags({ ...removingTags, [id]: !removingTags[id] });
   }
   async function remove(id) {
-    await fetch(`${API}/api/photos/${id}`, { method: 'DELETE' });
+    await fetch(apiUrl(`/api/photos/${id}`), { method: 'DELETE' });
     await load();
   }
 
@@ -230,7 +231,7 @@ function App() {
       </div>
       <div className="topbarActions">
         <LangSwitch lang={lang} setLang={setLang} t={t} />
-        <a href={`${API}/openapi.json`} target="_blank" rel="noreferrer">{t.api}</a>
+        <a href={apiUrl('/openapi.json')} target="_blank" rel="noreferrer">{t.api}</a>
       </div>
     </header>
 
