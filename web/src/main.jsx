@@ -28,33 +28,37 @@ function guessTags(name) {
   return tags.join(', ');
 }
 
-function parseTags(value) {
-  return [...new Set(String(value || '')
-    .split(',')
+function normalizeTags(values) {
+  return [...new Set(values
+    .flatMap((value) => String(value || '').split(','))
     .map((x) => x.trim())
     .filter(Boolean))].slice(0, 24);
 }
 
-function TagEditor({ photo, tags, editing, draftValue, t, onFilter, onEdit, onDraft, onSave, onCancel, expanded, onToggleExpanded }) {
+function TagEditor({ photo, tags, addDraft, t, onFilter, onAddDraft, onAdd, onRemove, expanded, onToggleExpanded }) {
   const visible = expanded ? tags : tags.slice(0, 5);
-  if (editing) {
-    return <div className="tagBlock tagEditor">
-      <span>{t.tagsLabel}</span>
-      <input
-        value={draftValue}
-        onChange={(e) => onDraft(e.target.value)}
-        placeholder={t.tagEditorPlaceholder}
-        autoFocus
-      />
-      <div className="tagActions">
-        <button className="saveTag" onClick={onSave}>{t.saveTags}</button>
-        <button className="cancelTag" onClick={onCancel}>{t.cancel}</button>
-      </div>
-    </div>;
-  }
-  return <div className="tagBlock">
-    <div className="tagBlockHead"><span>{t.tagsLabel}</span><button onClick={() => onEdit(photo.id, tags)}>{t.editTags}</button></div>
-    {tags.length ? <div className="miniTags">{visible.map(tg => <button key={tg} onClick={() => onFilter(tg)}>{tg}</button>)}{tags.length > 5 && <button className="moreTag" onClick={onToggleExpanded}>{expanded ? t.hide : t.moreSuffix(tags.length - 5)}</button>}</div> : <div className="noTags">{t.noTags}</div>}
+  const isAdding = Object.prototype.hasOwnProperty.call(addDraft, photo.id);
+  return <div className="tagBlock tagManager">
+    <div className="tagBlockHead"><span>{t.tagsLabel}</span><button className="addTagBtn" onClick={() => onAddDraft(photo.id, '')} aria-label={t.addTag}>+ {t.addTag}</button></div>
+    <div className="miniTags editableTags">
+      {visible.map(tg => <span className="editableTag" key={tg}>
+        <button className="tagName" onClick={() => onFilter(tg)}>{tg}</button>
+        <button className="tagRemove" onClick={() => onRemove(photo.id, tags, tg)} aria-label={t.removeTag(tg)}>−</button>
+      </span>)}
+      {tags.length > 5 && <button className="moreTag" onClick={onToggleExpanded}>{expanded ? t.hide : t.moreSuffix(tags.length - 5)}</button>}
+      {!tags.length && !isAdding && <span className="noTags">{t.noTags}</span>}
+      {isAdding && <span className="addTagInline">
+        <input
+          value={addDraft[photo.id] || ''}
+          onChange={(e) => onAddDraft(photo.id, e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') onAdd(photo.id, tags); if (e.key === 'Escape') onAddDraft(photo.id, null); }}
+          placeholder={t.addTagPlaceholder}
+          autoFocus
+        />
+        <button className="saveTag" onClick={() => onAdd(photo.id, tags)}>+</button>
+        <button className="cancelTag" onClick={() => onAddDraft(photo.id, null)}>×</button>
+      </span>}
+    </div>
   </div>;
 }
 
@@ -98,7 +102,7 @@ function App() {
   const [error, setError] = useState('');
   const [showDetails, setShowDetails] = useState(false);
   const [expandedTags, setExpandedTags] = useState({});
-  const [editingTags, setEditingTags] = useState({});
+  const [addTagDraft, setAddTagDraft] = useState({});
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
   const [lightboxId, setLightboxId] = useState(null);
@@ -176,15 +180,25 @@ function App() {
     if (!res.ok) throw new Error(await res.text());
     await load();
   }
-  function beginEditTags(id, tags) {
-    setEditingTags({ ...editingTags, [id]: tags.join(', ') });
+  function setTagDraft(id, value) {
+    if (value == null) setAddTagDraft(({ [id]: _removed, ...rest }) => rest);
+    else setAddTagDraft({ ...addTagDraft, [id]: value });
   }
-  async function saveTags(id) {
+  async function addPhotoTags(id, currentTags) {
+    const next = normalizeTags([...currentTags, addTagDraft[id] || '']);
+    if (next.length === currentTags.length && next.every((tg, i) => tg === currentTags[i])) return setTagDraft(id, null);
     try {
       setError('');
-      const tags = parseTags(editingTags[id]);
-      await patch(id, { tags });
-      setEditingTags(({ [id]: _removed, ...rest }) => rest);
+      await patch(id, { tags: next });
+      setTagDraft(id, null);
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+  }
+  async function removePhotoTag(id, currentTags, tagName) {
+    try {
+      setError('');
+      await patch(id, { tags: currentTags.filter((tg) => tg !== tagName) });
     } catch (e) {
       setError(e.message || String(e));
     }
@@ -259,14 +273,12 @@ function App() {
             <TagEditor
               photo={p}
               tags={photoTags}
-              editing={Object.prototype.hasOwnProperty.call(editingTags, p.id)}
-              draftValue={editingTags[p.id] || ''}
+              addDraft={addTagDraft}
               t={t}
               onFilter={setTag}
-              onEdit={beginEditTags}
-              onDraft={(value) => setEditingTags({ ...editingTags, [p.id]: value })}
-              onSave={() => saveTags(p.id)}
-              onCancel={() => setEditingTags(({ [p.id]: _removed, ...rest }) => rest)}
+              onAddDraft={setTagDraft}
+              onAdd={addPhotoTags}
+              onRemove={removePhotoTag}
               expanded={!!expandedTags[p.id]}
               onToggleExpanded={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}
             />
