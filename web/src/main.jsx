@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { Heart, Search, Trash2, Upload } from 'lucide-react';
+import { Check, Heart, Plus, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
@@ -43,8 +43,8 @@ function TagEditor({ photo, tags, addDraft, removing, t, onFilter, onAddDraft, o
     <div className="tagBlockHead">
       <span>{t.tagsLabel}</span>
       <div className="tagHeadActions">
-        <button className="addTagBtn" onClick={() => onAddDraft(photo.id, '')} aria-label={t.addTag}>+ {t.addTag}</button>
-        {!!tags.length && <button className={isRemoving ? 'removeModeBtn on' : 'removeModeBtn'} onClick={() => onToggleRemove(photo.id)}>{isRemoving ? t.done : t.manageTags}</button>}
+        <button className="tagToolBtn add" onClick={() => onAddDraft(photo.id, '')} aria-label={t.addTag} title={t.addTag}><Plus size={15} /></button>
+        {!!tags.length && <button className={isRemoving ? 'tagToolBtn remove on' : 'tagToolBtn remove'} onClick={() => onToggleRemove(photo.id)} aria-label={isRemoving ? t.done : t.manageTags} title={isRemoving ? t.done : t.manageTags}>{isRemoving ? <Check size={15} /> : <Trash2 size={14} />}</button>}
       </div>
     </div>
     <div className={isRemoving ? 'miniTags editableTags removing' : 'miniTags editableTags'}>

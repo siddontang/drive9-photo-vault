@@ -117,3 +117,8 @@
 .removeModeBtn{border:0;background:#f1f5f9;color:#64748b;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:900;cursor:pointer;line-height:1}
 .removeModeBtn.on{background:#fee2e2;color:#b91c1c}
 .editableTags:not(.removing) .editableTag{padding-right:3px}
+.tagToolBtn{border:0;width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;line-height:1}
+.tagToolBtn.add{background:#dbeafe;color:#1d4ed8}
+.tagToolBtn.remove{background:#f1f5f9;color:#64748b}
+.tagToolBtn.remove.on{background:#fee2e2;color:#b91c1c}
+.tagToolBtn:active{transform:scale(.96)}
