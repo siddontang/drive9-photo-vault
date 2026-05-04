@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
-import { fmtBytes, fmtDate, pickLangTags } from './i18n';
+import { fmtBytes, fmtDate, pickLangField, pickLangTags } from './i18n';
 import {
   canGoNext,
   canGoPrev,
@@ -137,8 +137,9 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, onTagC
 
   if (!photo) return null;
 
+  const caption = pickLangField(photo, lang, 'aiCaption');
   const tags = pickLangTags(photo, lang);
-  const hasMetadata = tags && tags.length > 0;
+  const hasMetadata = !!caption || (tags && tags.length > 0);
 
   return (
     <div
@@ -246,6 +247,12 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, onTagC
           <div className="lightboxInfoMeta">
             {[fmtDate(photo.createdAt, lang), photo.album, fmtBytes(photo.size)].filter(Boolean).join(' · ')}
           </div>
+          {caption && (
+            <section className="lightboxInfoSection">
+              <h4>{t.summary}</h4>
+              <p>{caption}</p>
+            </section>
+          )}
           {!!tags.length && (
             <section className="lightboxInfoSection">
               <h4>{t.tagsLabel}</h4>
