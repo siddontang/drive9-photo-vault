@@ -112,7 +112,7 @@ function App() {
   const [addTagDraft, setAddTagDraft] = useState({});
   const [removingTags, setRemovingTags] = useState({});
   const [expandedSummary, setExpandedSummary] = useState({});
-  const [draft, setDraft] = useState({ tags: '', album: 'Inbox', note: '' });
+  const [draft, setDraft] = useState({ tags: '' });
   const [lightboxId, setLightboxId] = useState(null);
 
   const lightboxIndex = lightboxId == null ? -1 : (reanchorIndex(photos, lightboxId) ?? -1);
@@ -157,8 +157,8 @@ function App() {
         fd.set('owner', owner);
         fd.set('title', file.name.replace(/\.[^.]+$/, '') || 'Untitled photo');
         fd.set('tags', draft.tags || guessTags(file.name));
-        fd.set('album', draft.album || 'Inbox');
-        fd.set('note', draft.note || '');
+        fd.set('album', 'Inbox');
+        fd.set('note', '');
         const res = await fetch(`${API}/api/photos`, { method: 'POST', body: fd });
         setProgress(t.progressIndexing(done + 1, files.length));
         if (!res.ok) throw new Error(await res.text());
@@ -170,7 +170,7 @@ function App() {
         }
         done++;
       }
-      setDraft({ tags: '', album: 'Inbox', note: '' });
+      setDraft({ tags: '' });
       setShowDetails(false);
       setProgress(t.progressRefreshing);
       await load();
@@ -241,10 +241,8 @@ function App() {
         <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
       </label>
       <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? t.hideOptions : t.addOptions}</button>
-      {showDetails && <div className="details">
+      {showDetails && <div className="details tagsOnlyDetails">
         <input placeholder={t.placeholderTags} value={draft.tags} onChange={e => setDraft({ ...draft, tags: e.target.value })} />
-        <input placeholder={t.placeholderAlbum} value={draft.album} onChange={e => setDraft({ ...draft, album: e.target.value })} />
-        <input className="wide" placeholder={t.placeholderNote} value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })} />
       </div>}
       {progress && <div className={busy ? 'progress' : 'progress done'}>{progress}</div>}
       {error && <div className="error">{error}</div>}
