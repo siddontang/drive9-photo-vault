@@ -144,6 +144,21 @@ function App() {
     return () => clearTimeout(tid);
   }, [q, tag]);
 
+  const pendingSinceRef = useRef(0);
+  const pendingSeenRef = useRef(new Set());
+  useEffect(() => {
+    const pendingIds = photos.filter(p => p.analysisStatus === 'pending').map(p => p.id);
+    if (!pendingIds.length) { pendingSinceRef.current = 0; pendingSeenRef.current = new Set(); return; }
+    const seen = pendingSeenRef.current;
+    if (pendingIds.some(id => !seen.has(id))) {
+      pendingSinceRef.current = Date.now();
+      pendingSeenRef.current = new Set(pendingIds);
+    }
+    if (Date.now() - pendingSinceRef.current > 120_000) return;
+    const tid = setTimeout(load, 5000);
+    return () => clearTimeout(tid);
+  }, [photos]);
+
   async function upload(files) {
     if (!files?.length) return;
     setBusy(true);

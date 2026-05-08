@@ -403,13 +403,12 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const objectKey = `${ROOT}/photos/${id}.${extFor(file.type)}`;
       const tags = String(form.get('tags') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
       await drive9Upload(env, objectKey, buf, file.type, [String(form.get('title') || file.name), String(form.get('note') || ''), String(form.get('album') || 'Inbox'), tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: String(form.get('album') || 'Inbox') });
-      const analysis = await getDrive9Semantic(env, objectKey, tags);
       const photo: Photo = {
         id,
         owner: String(form.get('owner') || 'guest'),
         title: String(form.get('title') || file.name.replace(/\.[^.]+$/, '') || 'Untitled photo'),
         note: String(form.get('note') || ''),
-        tags: analysis.tags.en.length ? analysis.tags.en : tags,
+        tags,
         album: String(form.get('album') || 'Inbox'),
         mime: file.type,
         size: file.size,
@@ -419,13 +418,13 @@ async function handle(req: Request, env: Env): Promise<Response> {
         archived: false,
         createdAt: now,
         updatedAt: now,
-        aiCaptionEn: analysis.caption.en,
-        aiCaptionZh: analysis.caption.zh,
-        aiTextEn: analysis.text.en,
-        aiTextZh: analysis.text.zh,
-        aiTagsEn: analysis.tags.en,
-        aiTagsZh: analysis.tags.zh,
-        analysisStatus: analysis.status,
+        aiCaptionEn: 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.',
+        aiCaptionZh: '',
+        aiTextEn: '',
+        aiTextZh: '',
+        aiTagsEn: [],
+        aiTagsZh: [],
+        analysisStatus: 'pending',
       };
       const photos = await getAllPhotos(env);
       const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
