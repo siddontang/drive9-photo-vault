@@ -269,14 +269,11 @@ function scorePhoto(photo: Photo, q: string) {
 
 
 async function getDrive9Semantic(env: Env, path: string, existingTags: string[]) {
-  for (let i = 0; i < 12; i++) {
-    const res = await d9(env, 'GET', path, null, {}, '?stat=1');
-    if (res.ok) {
-      const meta = await res.json<any>();
-      const analysis = buildDrive9SemanticResult(meta, existingTags);
-      if (analysis) return analysis;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+  const res = await d9(env, 'GET', path, null, {}, '?stat=1');
+  if (res.ok) {
+    const meta = await res.json<any>();
+    const analysis = buildDrive9SemanticResult(meta, existingTags);
+    if (analysis) return analysis;
   }
   return {
     caption: { zh: '', en: 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.' },
