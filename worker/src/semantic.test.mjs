@@ -229,6 +229,11 @@ test('drive9.video.tag.* tags are recognized alongside image tags', () => {
   assert.deepEqual(tagsZh, ['狗', '公园']);
 });
 
+// Video semantic_text uses the same structured JSON format as image extract.
+// Drive9 PR #751 writes content_text via UpdateFileSearchTextTx — the Vision
+// model outputs bilingual caption/description/tags in a JSON object with keys
+// like caption_zh, caption_en, tags_zh, tags_en, etc. This is the same shape
+// that buildDrive9SemanticResult already parses for images.
 test('video semantic_text JSON is parsed for captions and search', () => {
   const result = buildDrive9SemanticResult({
     semantic_text: JSON.stringify({

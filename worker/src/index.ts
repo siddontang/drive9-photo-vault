@@ -501,6 +501,12 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const headers: HeadersInit = { authorization: `Bearer ${env.DRIVE9_API_KEY}` };
       if (rangeHeader) headers['range'] = rangeHeader;
       const obj = await fetch(fsUrl(env, photo.objectKey), { method: 'GET', headers });
+      if (obj.status === 416) {
+        const respHeaders: Record<string, string> = { ...cors };
+        const cr = obj.headers.get('content-range');
+        if (cr) respHeaders['content-range'] = cr;
+        return new Response(obj.body, { status: 416, headers: respHeaders });
+      }
       if (!obj.ok && obj.status !== 206) return json({ error: 'drive9 read failed', status: obj.status, detail: await obj.text() }, { status: 502 });
       const respHeaders: Record<string, string> = { ...cors, 'content-type': photo.mime, 'cache-control': 'public, max-age=31536000, immutable' };
       if (obj.status === 206) {
@@ -513,7 +519,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
       }
       const cl = obj.headers.get('content-length');
       if (cl) respHeaders['content-length'] = cl;
-      respHeaders['accept-ranges'] = 'bytes';
+      const ar = obj.headers.get('accept-ranges');
+      if (ar) respHeaders['accept-ranges'] = ar;
       return new Response(obj.body, { headers: respHeaders });
     }
     const photoMatch = path.match(/^\/api\/photos\/([^/]+)$/);
