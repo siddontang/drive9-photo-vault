@@ -1,4 +1,4 @@
-import { buildDrive9SemanticResult } from './semantic';
+import { buildDrive9SemanticResult } from './semantic.js';
 
 export interface Env {
   DRIVE9_API_KEY: string;
@@ -577,4 +577,5 @@ async function handle(req: Request, env: Env): Promise<Response> {
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
+export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
 export default { fetch: handle };
