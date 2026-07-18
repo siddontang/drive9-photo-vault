@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsc -p tsconfig.test.json && node --test src/semantic.test.mjs src/index.test.mjs",
+    "test": "tsc -p tsconfig.test.json && node --test src/semantic.test.mjs src/index.test.mjs src/handler.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
