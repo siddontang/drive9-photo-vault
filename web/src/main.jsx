@@ -270,7 +270,7 @@ function App() {
 
     <section className="searchCard">
       <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={t.searchPlaceholder} /></label>
-      <div className="statsRow"><div className="stats">{totals.videos > 0 ? <><b>{totals.images || totals.photos}</b> {t.statsPhotos} · <b>{totals.videos}</b> {t.statsVideos} · </> : <><b>{totals.photos}</b> {t.statsPhotos} · </>}<b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmtBytes(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
+      <div className="statsRow"><div className="stats">{totals.videos > 0 ? <><b>{totals.images ?? totals.photos}</b> {t.statsPhotos} · <b>{totals.videos}</b> {t.statsVideos} · </> : <><b>{totals.photos}</b> {t.statsPhotos} · </>}<b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmtBytes(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
       <div className="chips">
         <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>{t.all}</button>
         {tags.slice(0, 8).map(tg => <button key={tg.name} className={tag === tg.name ? 'active' : ''} onClick={() => setTag(tg.name)}>{tg.name}</button>)}

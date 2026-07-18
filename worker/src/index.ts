@@ -73,8 +73,11 @@ const VIDEO_EXT_MIME: Record<string, string> = {
 };
 
 function effectiveVideoMime(rawMime: string, filename: string): string | null {
-  if (ALLOWED_VIDEO_MIME.has(rawMime)) return rawMime;
-  if (rawMime === '' || rawMime === 'application/octet-stream') {
+  // Strip MIME parameters (e.g. "video/mp4; codecs=avc1" → "video/mp4")
+  const base = rawMime.split(';')[0].trim().toLowerCase();
+  if (ALLOWED_VIDEO_MIME.has(base)) return base;
+  // Fall back to extension for generic/empty types (aligned with Drive9 #751)
+  if (base === '' || base === 'application/octet-stream' || base === 'text/plain') {
     const name = filename.toLowerCase();
     for (const [ext, mime] of Object.entries(VIDEO_EXT_MIME)) {
       if (name.endsWith(ext)) return mime;
@@ -199,7 +202,7 @@ async function getIndexItems(env: Env): Promise<PhotoIndexItem[]> {
 }
 async function getPhotoMeta(env: Env, item: PhotoIndexItem): Promise<Photo> {
   const res = await d9(env, 'GET', metaPath(item.id));
-  if (res.ok) return compactPhotoMeta(await res.json<Photo>());
+  if (res.ok) return compactPhotoMeta(await res.json() as Photo);
   return photoFromIndexItem(item);
 }
 async function getAllPhotos(env: Env): Promise<Photo[]> {
@@ -318,7 +321,7 @@ function scorePhoto(photo: Photo, q: string) {
 async function getDrive9Semantic(env: Env, path: string, existingTags: string[]) {
   const res = await d9(env, 'GET', path, null, {}, '?stat=1');
   if (res.ok) {
-    const meta = await res.json<any>();
+    const meta = await res.json() as any;
     const analysis = buildDrive9SemanticResult(meta, existingTags);
     if (analysis) return analysis;
   }
@@ -351,7 +354,7 @@ async function drive9Upload(env: Env, path: string, buf: ArrayBuffer, mime: stri
     body: JSON.stringify({ path, total_size: buf.byteLength, description }),
   });
   if (!init.ok) throw new Error(`drive9 multipart initiate failed: ${init.status} ${await init.text()}`);
-  const plan = await init.json<Drive9UploadPlan>();
+  const plan = await init.json() as Drive9UploadPlan;
 
   const batchSize = 8;
   const completed: Drive9CompletePart[] = [];
@@ -363,8 +366,8 @@ async function drive9Upload(env: Env, path: string, buf: ArrayBuffer, mime: stri
       body: JSON.stringify({ parts: Array.from({ length: end - start + 1 }, (_, i) => ({ part_number: start + i })) }),
     });
     if (!presign.ok) throw new Error(`drive9 multipart presign failed: ${presign.status} ${await presign.text()}`);
-    const presigned = await presign.json<{ parts: Drive9PresignedPart[] }>();
-    const uploaded = await Promise.all(presigned.parts.map(async (part) => {
+    const presigned = await presign.json() as { parts: Drive9PresignedPart[] };
+    const uploaded = await Promise.all(presigned.parts.map(async (part: Drive9PresignedPart) => {
       const offset = (part.number - 1) * plan.part_size;
       const chunk = buf.slice(offset, offset + part.size);
       const headers = new Headers(part.headers || {});
@@ -526,7 +529,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
     const photoMatch = path.match(/^\/api\/photos\/([^/]+)$/);
     if (photoMatch && req.method === 'PATCH') {
       const id = photoMatch[1];
-      const patch = await req.json<any>().catch(() => ({}));
+      const patch = await req.json().catch(() => ({})) as any;
       const photos = await getAllPhotos(env);
       const i = photos.findIndex((p) => p.id === id);
       if (i < 0) return json({ error: 'photo not found' }, { status: 404 });
@@ -535,8 +538,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
         title: typeof patch.title === 'string' ? patch.title : prev.title,
         note: typeof patch.note === 'string' ? patch.note : prev.note,
         album: typeof patch.album === 'string' ? patch.album : prev.album,
-        tags: Array.isArray(patch.tags) ? [...new Set(patch.tags.map(String).map((x: string) => x.trim()).filter(Boolean))].slice(0, 24) : prev.tags,
-        aiTagsEn: Array.isArray(patch.tags) ? [...new Set(patch.tags.map(String).map((x: string) => x.trim()).filter(Boolean))].slice(0, 24) : prev.aiTagsEn,
+        tags: Array.isArray(patch.tags) ? [...new Set<string>(patch.tags.map(String).map((x: string) => x.trim()).filter(Boolean))].slice(0, 24) : prev.tags,
+        aiTagsEn: Array.isArray(patch.tags) ? [...new Set<string>(patch.tags.map(String).map((x: string) => x.trim()).filter(Boolean))].slice(0, 24) : prev.aiTagsEn,
         aiTagsZh: Array.isArray(patch.tags) ? [] : prev.aiTagsZh,
         favorite: typeof patch.favorite === 'boolean' ? patch.favorite : prev.favorite,
         archived: typeof patch.archived === 'boolean' ? patch.archived : prev.archived,
