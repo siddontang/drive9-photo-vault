@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { Check, Heart, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { Check, Heart, Play, Plus, Search, Trash2, Upload } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
@@ -10,6 +10,11 @@ import { reanchorIndex } from './lightboxNav.js';
 const API = import.meta.env.VITE_API_BASE || '';
 const apiUrl = (path) => `${API}${path}`;
 const owner = localStorage.photoVaultOwner || (localStorage.photoVaultOwner = `guest-${crypto.randomUUID().slice(0, 8)}`);
+
+function isVideo(photo) {
+  if (photo.mediaKind === 'video') return true;
+  return photo.mime && photo.mime.startsWith('video/');
+}
 
 function withViewTransition(update) {
   if (typeof document !== 'undefined' && document.startViewTransition) {
@@ -144,17 +149,16 @@ function App() {
     return () => clearTimeout(tid);
   }, [q, tag]);
 
-  const pendingSinceRef = useRef(0);
-  const pendingSeenRef = useRef(new Set());
+  const PENDING_TIMEOUT_MS = 600_000;
+  function isPendingTimedOut(photo) {
+    if (photo.analysisStatus !== 'pending') return false;
+    const created = new Date(photo.updatedAt || photo.createdAt).getTime();
+    return !isNaN(created) && Date.now() - created > PENDING_TIMEOUT_MS;
+  }
+
   useEffect(() => {
-    const pendingIds = photos.filter(p => p.analysisStatus === 'pending').map(p => p.id);
-    if (!pendingIds.length) { pendingSinceRef.current = 0; pendingSeenRef.current = new Set(); return; }
-    const seen = pendingSeenRef.current;
-    if (pendingIds.some(id => !seen.has(id))) {
-      pendingSinceRef.current = Date.now();
-      pendingSeenRef.current = new Set(pendingIds);
-    }
-    if (Date.now() - pendingSinceRef.current > 120_000) return;
+    const pendingItems = photos.filter(p => p.analysisStatus === 'pending' && !isPendingTimedOut(p));
+    if (!pendingItems.length) return;
     const tid = setTimeout(load, 5000);
     return () => clearTimeout(tid);
   }, [photos]);
@@ -254,7 +258,7 @@ function App() {
       <label className="uploadButton picker">
         <Upload size={22} />
         <span>{busy ? t.working : t.choose}</span>
-        <input type="file" accept="image/*" multiple onChange={e => upload(e.target.files)} />
+        <input type="file" accept="image/*,video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska" multiple onChange={e => upload(e.target.files)} />
       </label>
       <button className="plain" onClick={() => setShowDetails(!showDetails)}>{showDetails ? t.hideOptions : t.addOptions}</button>
       {showDetails && <div className="details tagsOnlyDetails">
@@ -266,7 +270,7 @@ function App() {
 
     <section className="searchCard">
       <label className="search"><Search size={18} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={t.searchPlaceholder} /></label>
-      <div className="statsRow"><div className="stats"><b>{totals.photos}</b> {t.statsPhotos} · <b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmtBytes(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
+      <div className="statsRow"><div className="stats">{totals.videos > 0 ? <><b>{totals.images || totals.photos}</b> {t.statsPhotos} · <b>{totals.videos}</b> {t.statsVideos} · </> : <><b>{totals.photos}</b> {t.statsPhotos} · </>}<b>{totals.favorites}</b> {t.statsFavorites} · <b>{fmtBytes(totals.bytes)}</b></div><button className="refresh" onClick={load}>{t.refresh}</button></div>
       <div className="chips">
         <button className={!tag ? 'active' : ''} onClick={() => setTag('')}>{t.all}</button>
         {tags.slice(0, 8).map(tg => <button key={tg.name} className={tag === tg.name ? 'active' : ''} onClick={() => setTag(tg.name)}>{tg.name}</button>)}
@@ -277,23 +281,38 @@ function App() {
       {photos.map(p => {
         const caption = pickLangField(p, lang, 'aiCaption');
         const photoTags = pickLangTags(p, lang);
+        const vid = isVideo(p);
         return <article key={p.id} className="photo">
           <button
             className="photoOpen"
             type="button"
             onClick={() => withViewTransition(() => setLightboxId(p.id))}
           >
-            <img
-              src={p.url}
-              loading="lazy"
-              alt={p.title}
-              style={lightboxId == null ? { viewTransitionName: `photo-${p.id}` } : undefined}
-            />
+            {vid ? (
+              <div
+                className="videoThumb"
+                style={lightboxId == null ? { viewTransitionName: `photo-${p.id}` } : undefined}
+              >
+                <span className="playBadge"><Play size={18} /></span>
+                <span className="videoLabel">{p.title}</span>
+              </div>
+            ) : (
+              <img
+                src={p.url}
+                loading="lazy"
+                alt={p.title}
+                style={lightboxId == null ? { viewTransitionName: `photo-${p.id}` } : undefined}
+              />
+            )}
           </button>
           <div className="photoInfo">
             <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
             <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
-            {p.analysisStatus === 'pending' && <div className="pending">{t.pending}</div>}
+            {p.analysisStatus === 'pending' && (
+              isPendingTimedOut(p) ? <div className="pending timeout">{t.pendingTimeout}</div>
+              : vid ? <div className="pending">{t.pendingVideo}</div>
+              : <div className="pending">{t.pending}</div>
+            )}
             {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
             <TagEditor
               photo={p}

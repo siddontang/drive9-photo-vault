@@ -74,16 +74,22 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, onTagC
     };
   }, []);
 
-  // Neighbor preloading: warm browser cache for prev/next photos
-  const prevUrl = photos[index - 1]?.url;
-  const nextUrl = photos[index + 1]?.url;
+  function isVideoItem(p) {
+    if (!p) return false;
+    if (p.mediaKind === 'video') return true;
+    return p.mime && p.mime.startsWith('video/');
+  }
+
+  // Neighbor preloading: warm browser cache for prev/next (images only)
+  const prevPhoto = photos[index - 1];
+  const nextPhoto = photos[index + 1];
   useEffect(() => {
-    for (const url of [prevUrl, nextUrl]) {
-      if (!url) continue;
+    for (const p of [prevPhoto, nextPhoto]) {
+      if (!p || isVideoItem(p)) continue;
       const img = new Image();
-      img.src = url;
+      img.src = p.url;
     }
-  }, [prevUrl, nextUrl]);
+  }, [prevPhoto?.url, nextPhoto?.url]);
 
   function goPrev() {
     if (canGoPrev(index)) onIndexChange(prevIdx(index));
@@ -157,15 +163,28 @@ export default function Lightbox({ photos, index, onClose, onIndexChange, onTagC
         if (showInfo) toggleInfo(false);
         else onClose();
       }}>
-        <img
-          key={photo.id}
-          className="lightboxImage"
-          src={photo.url}
-          alt={photo.title}
-          loading="eager"
-          draggable={false}
-          style={{ viewTransitionName: `photo-${photo.id}` }}
-        />
+        {isVideoItem(photo) ? (
+          <video
+            key={photo.id}
+            className="lightboxImage"
+            src={photo.url}
+            controls
+            playsInline
+            preload="metadata"
+            draggable={false}
+            style={{ viewTransitionName: `photo-${photo.id}` }}
+          />
+        ) : (
+          <img
+            key={photo.id}
+            className="lightboxImage"
+            src={photo.url}
+            alt={photo.title}
+            loading="eager"
+            draggable={false}
+            style={{ viewTransitionName: `photo-${photo.id}` }}
+          />
+        )}
       </div>
 
       <div className="lightboxTopBar" aria-hidden={!showControls}>

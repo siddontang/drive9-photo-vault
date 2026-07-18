@@ -9,6 +9,8 @@ export type Drive9SemanticResult = {
 
 const DRIVE9_IMAGE_EN_TAG_RE = /^drive9\.image\.tag\.en\.(\d+)$/;
 const DRIVE9_IMAGE_ZH_TAG_RE = /^drive9\.image\.tag\.zh\.(\d+)$/;
+const DRIVE9_VIDEO_EN_TAG_RE = /^drive9\.video\.tag\.en\.(\d+)$/;
+const DRIVE9_VIDEO_ZH_TAG_RE = /^drive9\.video\.tag\.zh\.(\d+)$/;
 const MAX_TAGS = 30;
 const MAX_TAG_RUNES = 64;
 const MAX_CAPTION_LENGTH = 500;
@@ -21,6 +23,9 @@ const deniedDisplayTags = new Set([
   'drive 9',
   'image_extract',
   'image extract',
+  'video_extract',
+  'video extract',
+  'video',
   'structured_v1',
   'structured v1',
   'schema',
@@ -241,10 +246,16 @@ function extractLangLines(text: string, lang: 'zh' | 'en'): string {
 function drive9ImageTagsByLang(tagsMeta: unknown, lang: 'zh' | 'en'): string[] {
   if (!isRecord(tagsMeta)) return [];
 
-  const re = lang === 'zh' ? DRIVE9_IMAGE_ZH_TAG_RE : DRIVE9_IMAGE_EN_TAG_RE;
+  const patterns = lang === 'zh'
+    ? [DRIVE9_IMAGE_ZH_TAG_RE, DRIVE9_VIDEO_ZH_TAG_RE]
+    : [DRIVE9_IMAGE_EN_TAG_RE, DRIVE9_VIDEO_EN_TAG_RE];
   const tags: Array<{ order: number; value: string }> = [];
   for (const [key, value] of Object.entries(tagsMeta)) {
-    const match = key.match(re);
+    let match: RegExpMatchArray | null = null;
+    for (const re of patterns) {
+      match = key.match(re);
+      if (match) break;
+    }
     if (!match) continue;
 
     const order = Number(match[1]);
@@ -430,7 +441,7 @@ function cleanDisplayTag(raw: unknown, lowercase = false): string {
   tag = truncateRunes(tag, MAX_TAG_RUNES).trim();
 
   const key = tag.toLowerCase();
-  if (!tag || deniedDisplayTags.has(key) || key.startsWith('drive9.image.')) return '';
+  if (!tag || deniedDisplayTags.has(key) || key.startsWith('drive9.image.') || key.startsWith('drive9.video.')) return '';
   return tag;
 }
 

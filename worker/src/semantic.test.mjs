@@ -213,3 +213,51 @@ test('buildDrive9SemanticResult returns null when meta is empty or invalid', () 
   assert.equal(buildDrive9SemanticResult({ semantic_text: '' }), null);
   assert.equal(buildDrive9SemanticResult({ semantic_text: '   \n  ' }), null);
 });
+
+test('drive9.video.tag.* tags are recognized alongside image tags', () => {
+  const tagsEn = tagsEnFromDrive9Meta({
+    'drive9.video.tag.en.0': 'dog',
+    'drive9.video.tag.en.1': 'park',
+    'drive9.video.tag.en.2': 'running',
+  }, ['manual']);
+  assert.deepEqual(tagsEn, ['manual', 'dog', 'park', 'running']);
+
+  const tagsZh = tagsZhFromDrive9Meta({
+    'drive9.video.tag.zh.0': '狗',
+    'drive9.video.tag.zh.1': '公园',
+  });
+  assert.deepEqual(tagsZh, ['狗', '公园']);
+});
+
+test('video semantic_text JSON is parsed for captions and search', () => {
+  const result = buildDrive9SemanticResult({
+    semantic_text: JSON.stringify({
+      caption_zh: '一只狗在公园奔跑',
+      description_zh: '一只金毛猎犬在公园的草地上快乐地奔跑。',
+      caption_en: 'A dog running in a park',
+      description_en: 'A golden retriever running happily on the grass in a park.',
+      tags_zh: ['狗', '公园', '奔跑'],
+      tags_en: ['dog', 'park', 'running', 'golden retriever'],
+    }),
+    tags: {
+      'drive9.video.tag.en.0': 'dog',
+      'drive9.video.tag.en.1': 'park',
+    },
+  });
+
+  assert.equal(result?.caption.en, 'A dog running in a park');
+  assert.equal(result?.caption.zh, '一只狗在公园奔跑');
+  assert.deepEqual(result?.tags.en, ['dog', 'park']);
+  assert.deepEqual(result?.tags.zh, ['狗', '公园', '奔跑']);
+  assert.match(result?.text.en || '', /英文摘要：A dog running in a park/);
+  assert.match(result?.text.zh || '', /中文摘要：一只狗在公园奔跑/);
+});
+
+test('drive9.video.* system tags are filtered from display', () => {
+  const tagsEn = tagsEnFromDrive9Meta({
+    'drive9.video.schema': 'structured_v1',
+    'drive9.video.source': 'video_extract',
+    'drive9.video.tag.en.0': 'sunset',
+  }, []);
+  assert.deepEqual(tagsEn, ['sunset']);
+});
