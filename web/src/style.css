@@ -122,8 +122,9 @@
 .tagToolBtn.remove{background:#f1f5f9;color:#64748b}
 .tagToolBtn.remove.on{background:#fee2e2;color:#b91c1c}
 .tagToolBtn:active{transform:scale(.96)}
-.videoThumb{position:relative;width:100%;aspect-ratio:1/1;background:#1e293b;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-direction:column;gap:8px}
-.playBadge{background:rgba(255,255,255,.15);color:rgba(255,255,255,.9);border-radius:999px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
-.videoLabel{color:rgba(255,255,255,.5);font-size:12px;font-weight:600;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.videoThumb{position:relative;width:100%;aspect-ratio:1/1;background:linear-gradient(135deg,#1e293b 0%,#334155 100%);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.videoPreview{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.playBadge{position:absolute;z-index:1;background:rgba(0,0,0,.4);color:rgba(255,255,255,.95);border-radius:999px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);transition:opacity .2s ease;pointer-events:none}
+.videoThumb:hover .playBadge{opacity:.7}
 .pending.timeout{background:#fef2f2;color:#991b1b;border-color:#fecaca}
 @media(max-width:420px){.videoThumb{aspect-ratio:4/3}}
