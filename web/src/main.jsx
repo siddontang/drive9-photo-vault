@@ -293,8 +293,17 @@ function App() {
                 className="videoThumb"
                 style={lightboxId == null ? { viewTransitionName: `photo-${p.id}` } : undefined}
               >
+                <video
+                  src={p.url + '#t=0.5'}
+                  preload="metadata"
+                  muted
+                  loop
+                  playsInline
+                  className="videoPreview"
+                  onMouseEnter={e => { if (!matchMedia('(hover:none)').matches && !matchMedia('(prefers-reduced-motion:reduce)').matches) e.target.play().catch(() => {}); }}
+                  onMouseLeave={e => { e.target.pause(); e.target.currentTime = 0.5; }}
+                />
                 <span className="playBadge"><Play size={18} /></span>
-                <span className="videoLabel">{p.title}</span>
               </div>
             ) : (
               <img
