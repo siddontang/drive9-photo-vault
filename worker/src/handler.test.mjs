@@ -4,10 +4,14 @@ import assert from 'node:assert/strict';
 // Mock Drive9 backend via globalThis.fetch interception.
 // Stores files and index as raw bytes, handles gzip for index.
 const drive9Store = new Map();  // path → Uint8Array | string body
+let drive9SearchRows = [];
+let drive9SearchStatus = 200;
+let lastDrive9SearchURL = null;
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
   const u = typeof url === 'string' ? url : url.toString();
+  const parsedURL = new URL(u);
   const method = opts.method || 'GET';
   // Extract the path portion after /v1/fs
   const fsMatch = u.match(/\/v1\/fs(\/.*?)(?:\?.*)?$/);
@@ -24,6 +28,11 @@ globalThis.fetch = async (url, opts = {}) => {
     else stored = body;
     drive9Store.set(fsPath, stored);
     return new Response('', { status: 200 });
+  }
+
+  if (method === 'GET' && fsPath === '/photovault/photos/' && parsedURL.searchParams.has('grep')) {
+    lastDrive9SearchURL = parsedURL;
+    return new Response(JSON.stringify(drive9SearchRows), { status: drive9SearchStatus });
   }
 
   // Stat endpoint (must check before generic GET)
@@ -92,6 +101,9 @@ const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999'
 
 function resetState() {
   drive9Store.clear();
+  drive9SearchRows = [];
+  drive9SearchStatus = 200;
+  lastDrive9SearchURL = null;
 }
 
 // Helper: upload a file and return the response body
@@ -153,6 +165,74 @@ test('POST /api/photos accepts image upload with mediaKind=image', async () => {
   const { status, body } = await uploadFile('photo.jpg', 'image/jpeg', new Uint8Array(100));
   assert.equal(status, 201);
   assert.equal(body.photo.mediaKind, 'image');
+});
+
+test('GET /api/photos uses ranked Drive9 search paths', async () => {
+  resetState();
+  const cat = await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(10));
+  const adapter = await uploadFile('adapter.jpg', 'image/jpeg', new Uint8Array(10));
+  drive9SearchRows = [
+    { path: cat.body.photo.objectKey, score: 0.8 },
+    { path: '/outside/photovault.jpg', score: 0.7 },
+    { path: adapter.body.photo.objectKey, score: 0.6 },
+  ];
+
+  const res = await handler(new Request('http://localhost/api/photos?q=feline%20pet'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.photos.map((photo) => photo.id), [cat.body.photo.id, adapter.body.photo.id]);
+  assert.deepEqual(body.photos.map((photo) => photo.score), [0.8, 0.6]);
+  assert.equal(lastDrive9SearchURL.pathname, '/v1/fs/photovault/photos/');
+  assert.equal(lastDrive9SearchURL.searchParams.get('grep'), 'feline pet');
+  assert.equal(lastDrive9SearchURL.searchParams.get('limit'), '100');
+});
+
+test('GET /api/photos treats a null Drive9 search response as no matches', async () => {
+  resetState();
+  await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(10));
+  drive9SearchRows = null;
+
+  const res = await handler(new Request('http://localhost/api/photos?q=no-match'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.photos, []);
+  assert.equal(body.count, 0);
+});
+
+test('GET /api/photos treats whitespace as an unfiltered list', async () => {
+  resetState();
+  const cat = await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(10));
+
+  const res = await handler(new Request('http://localhost/api/photos?q=%20%20%20'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.photos.map((photo) => photo.id), [cat.body.photo.id]);
+  assert.equal(lastDrive9SearchURL, null);
+});
+
+test('GET /api/photos reports a Drive9 search failure', async () => {
+  resetState();
+  drive9SearchStatus = 503;
+
+  const res = await handler(new Request('http://localhost/api/photos?q=cat'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 500);
+  assert.match(body.error, /^drive9 search failed: 503/);
+});
+
+test('GET /api/photos rejects an invalid Drive9 search response', async () => {
+  resetState();
+  drive9SearchRows = {};
+
+  const res = await handler(new Request('http://localhost/api/photos?q=cat'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 500);
+  assert.equal(body.error, 'drive9 search returned an invalid response');
 });
 
 // -- File proxy / Range --

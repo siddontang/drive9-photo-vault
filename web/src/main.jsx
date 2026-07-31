@@ -122,7 +122,8 @@ function App() {
   const [draft, setDraft] = useState({ tags: '' });
   const [lightboxId, setLightboxId] = useState(null);
   const photoLoadGate = useRef(null);
-  if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate();
+  if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate(q, tag);
+  photoLoadGate.current.setSearch(q, tag);
 
   const lightboxIndex = lightboxId == null ? -1 : (reanchorIndex(photos, lightboxId) ?? -1);
   useEffect(() => {
@@ -131,9 +132,10 @@ function App() {
 
   async function loadPhotos(signal) {
     const request = photoLoadGate.current.begin();
+    const { q: searchQuery, tag: searchTag } = request.search;
     const params = new URLSearchParams();
-    if (q) params.set('q', q);
-    if (tag) params.set('tag', tag);
+    if (searchQuery) params.set('q', searchQuery);
+    if (searchTag) params.set('tag', searchTag);
     try {
       const response = await fetch(apiUrl(`/api/photos?${params}`), { cache: 'no-store', signal });
       if (!response.ok) throw new Error(await response.text());
@@ -192,7 +194,7 @@ function App() {
     if (!pendingItems.length) return;
     const tid = setTimeout(load, 5000);
     return () => clearTimeout(tid);
-  }, [photos]);
+  }, [photos, q, tag]);
 
   async function upload(files) {
     if (!files?.length) return;

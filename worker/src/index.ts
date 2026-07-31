@@ -54,6 +54,11 @@ type PhotoIndexItem = {
   analysisStatus?: string;
 };
 
+type Drive9SearchResult = {
+  path: string;
+  score?: number;
+};
+
 const ALLOWED_VIDEO_MIME = new Set([
   'video/mp4',
   'video/quicktime',
@@ -115,12 +120,6 @@ function text(data: string, init: ResponseInit = {}) {
 async function sha256(buf: ArrayBuffer) {
   const digest = await crypto.subtle.digest('SHA-256', buf);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-function tokenize(input: string) {
-  return input.toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean);
-}
-function containsChinese(input: string) {
-  return /[\u4e00-\u9fa5]/.test(input);
 }
 function drive9Base(env: Env) {
   return (env.DRIVE9_SERVER || 'https://api.drive9.ai').replace(/\/$/, '');
@@ -307,21 +306,18 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
   return photos.map(compactPhotoMeta);
 }
 
-function scorePhoto(photo: Photo, q: string) {
-  if (!q) return 1;
-  const hay = [
-    photo.title, photo.note, photo.album, photo.tags.join(' '), photo.owner,
-    photo.aiCaptionEn || '', photo.aiCaptionZh || '',
-    photo.aiTextEn || '', photo.aiTextZh || '',
-    (photo.aiTagsEn || []).join(' '), (photo.aiTagsZh || []).join(' '),
-  ].join(' ').toLowerCase();
-  const words = tokenize(q);
-  if (!words.length) return 1;
-  const hayWords = new Set(tokenize(hay));
-  return words.reduce((score, word) => {
-    const matches = containsChinese(word) ? hay.includes(word) : hayWords.has(word);
-    return score + (matches ? 1 : 0);
-  }, 0) / words.length;
+async function searchDrive9(env: Env, query: string, limit = 100) {
+  const params = new URLSearchParams({ grep: query, limit: String(limit) });
+  const res = await d9(env, 'GET', `${ROOT}/photos/`, null, {}, `?${params}`);
+  if (!res.ok) throw new Error(`drive9 search failed: ${res.status}`);
+  const body = await res.json() as unknown;
+  if (body === null) return [];
+  if (!Array.isArray(body)) throw new Error('drive9 search returned an invalid response');
+  return body.filter((result): result is Drive9SearchResult => (
+    typeof result === 'object' &&
+    result !== null &&
+    typeof (result as Drive9SearchResult).path === 'string'
+  ));
 }
 
 
@@ -438,15 +434,23 @@ async function handle(req: Request, env: Env): Promise<Response> {
       return json({ ok: status.ok, service: 'drive9-photo-api', storage: 'drive9', drive9Status: status.status, drive9: body ? safeJson(body) : null, time: new Date().toISOString() }, { status: status.ok ? 200 : 503 });
     }
     if (path === '/api/photos' && req.method === 'GET') {
-      const q = url.searchParams.get('q') || '';
+      const q = (url.searchParams.get('q') || '').trim();
       const tag = (url.searchParams.get('tag') || '').toLowerCase();
       const owner = url.searchParams.get('owner') || '';
       const favorite = url.searchParams.get('favorite');
-      const photos = await refreshDrive9Semantics(env, await getAllPhotos(env));
-      const filtered = photos
-        .filter((p) => !p.archived)
-        .map((p) => ({ photo: p, score: scorePhoto(p, q) }))
-        .filter(({ photo, score }) => score > 0 && (!tag || photo.tags.map((t) => t.toLowerCase()).includes(tag)) && (!owner || photo.owner === owner) && (favorite === null || String(photo.favorite) === favorite))
+      const photos = (await refreshDrive9Semantics(env, await getAllPhotos(env))).filter((p) => !p.archived);
+      const photosByPath = new Map(photos.map((photo) => [photo.objectKey, photo]));
+      const ranked = q
+        ? (await searchDrive9(env, q)).flatMap((result, index) => {
+            const photo = photosByPath.get(result.path);
+            return photo ? [{
+              photo,
+              score: typeof result.score === 'number' ? result.score : 1 / (index + 1),
+            }] : [];
+          })
+        : photos.map((photo) => ({ photo, score: 1 }));
+      const filtered = ranked
+        .filter(({ photo }) => (!tag || photo.tags.map((t) => t.toLowerCase()).includes(tag)) && (!owner || photo.owner === owner) && (favorite === null || String(photo.favorite) === favorite))
         .sort((a, b) => b.score - a.score || +new Date(b.photo.createdAt) - +new Date(a.photo.createdAt))
         .map(({ photo, score }) => ({ ...photo, score, url: `${url.origin}/api/photos/${photo.id}/file` }));
       return json({ photos: filtered, count: filtered.length, storage: 'drive9' });
@@ -584,5 +588,5 @@ async function handle(req: Request, env: Env): Promise<Response> {
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
-export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, scorePhoto, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
+export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
 export default { fetch: handle };

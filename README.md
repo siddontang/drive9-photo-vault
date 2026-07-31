@@ -45,7 +45,8 @@ Important design choice: the app does **not** use Cloudflare R2, KV, or Workers 
 2. The Worker writes the original file into drive9 under `/photovault/photos/`.
 3. drive9 asynchronously analyzes the file (image semantics/OCR, or video visual extraction) and exposes metadata via `?stat=1`.
 4. The Worker refreshes metadata from drive9 and compacts it into `/photovault/index.json`.
-5. The website searches against title, note, album, tags, caption, and compact semantic text.
+5. For a non-empty query, the Worker calls drive9's scoped `grep` search on `/photovault/photos/`; drive9 combines full-text and semantic ranking.
+6. The Worker maps the ranked drive9 paths back to the compact PhotoVault metadata and applies tag, owner, and favorite filters.
 
 Because drive9 analysis is async, a newly uploaded file may first appear with `drive9 analyzing...`; tags/search metadata usually appear after refresh/search a few seconds later. Video analysis typically takes longer than image analysis.
 
