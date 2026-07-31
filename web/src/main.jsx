@@ -6,6 +6,7 @@ import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
+import { createLatestRequestGate } from './latestRequest.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
 const apiUrl = (path) => `${API}${path}`;
@@ -120,34 +121,66 @@ function App() {
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '' });
   const [lightboxId, setLightboxId] = useState(null);
+  const photoLoadGate = useRef(null);
+  if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate(q, tag);
+  photoLoadGate.current.setSearch(q, tag);
 
   const lightboxIndex = lightboxId == null ? -1 : (reanchorIndex(photos, lightboxId) ?? -1);
   useEffect(() => {
     if (lightboxId != null && lightboxIndex < 0) setLightboxId(null);
   }, [lightboxId, lightboxIndex]);
 
-  async function load() {
-    setError('');
+  async function loadPhotos(signal) {
+    const request = photoLoadGate.current.begin();
+    const { q: searchQuery, tag: searchTag } = request.search;
     const params = new URLSearchParams();
-    if (q) params.set('q', q);
-    if (tag) params.set('tag', tag);
+    if (searchQuery) params.set('q', searchQuery);
+    if (searchTag) params.set('tag', searchTag);
     try {
-      const [p, c] = await Promise.all([
-        fetch(apiUrl(`/api/photos?${params}`), { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
-        fetch(apiUrl('/api/collections'), { cache: 'no-store' }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-      ]);
+      const response = await fetch(apiUrl(`/api/photos?${params}`), { cache: 'no-store', signal });
+      if (!response.ok) throw new Error(await response.text());
+      const p = await response.json();
+      if (!request.isCurrent()) return;
       setPhotos((p.photos || []).map((photo) => ({ ...photo, url: apiUrl(`/api/photos/${photo.id}/file`) })));
-      setCollections(c);
     } catch (e) {
+      if (e?.name === 'AbortError' || !request.isCurrent()) return;
       setError(t.errorLoad(e.message || e));
-      setTimeout(() => load(), 2500);
+      setTimeout(() => {
+        if (request.isCurrent()) loadPhotos();
+      }, 2500);
     }
   }
 
+  async function loadCollections() {
+    try {
+      const response = await fetch(apiUrl('/api/collections'), { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      const c = await response.json();
+      setCollections(c);
+    } catch (e) {
+      setError(t.errorLoad(e.message || e));
+    }
+  }
+
+  async function load() {
+    setError('');
+    await Promise.all([loadPhotos(), loadCollections()]);
+  }
+
   useEffect(() => {
-    const tid = setTimeout(load, 180);
-    return () => clearTimeout(tid);
+    setError('');
+    const controller = new AbortController();
+    const tid = setTimeout(() => loadPhotos(controller.signal), 180);
+    return () => {
+      clearTimeout(tid);
+      controller.abort();
+      photoLoadGate.current.invalidate();
+    };
   }, [q, tag]);
+
+  useEffect(() => {
+    loadCollections();
+  }, []);
 
   const PENDING_TIMEOUT_MS = 600_000;
   function isPendingTimedOut(photo) {
@@ -161,7 +194,7 @@ function App() {
     if (!pendingItems.length) return;
     const tid = setTimeout(load, 5000);
     return () => clearTimeout(tid);
-  }, [photos]);
+  }, [photos, q, tag]);
 
   async function upload(files) {
     if (!files?.length) return;
