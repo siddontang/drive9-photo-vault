@@ -1,4 +1,5 @@
 import { buildDrive9SemanticResult } from './semantic.js';
+import { rerankPhotoCandidates } from './search.js';
 
 export interface Env {
   DRIVE9_API_KEY: string;
@@ -449,9 +450,15 @@ async function handle(req: Request, env: Env): Promise<Response> {
             }] : [];
           })
         : photos.map((photo) => ({ photo, score: 1 }));
-      const filtered = ranked
-        .filter(({ photo }) => (!tag || photo.tags.map((t) => t.toLowerCase()).includes(tag)) && (!owner || photo.owner === owner) && (favorite === null || String(photo.favorite) === favorite))
-        .sort((a, b) => b.score - a.score || +new Date(b.photo.createdAt) - +new Date(a.photo.createdAt))
+      const matchingMetadata = ranked.filter(({ photo }) => (
+        (!tag || photo.tags.map((t) => t.toLowerCase()).includes(tag)) &&
+        (!owner || photo.owner === owner) &&
+        (favorite === null || String(photo.favorite) === favorite)
+      ));
+      const ordered = q
+        ? rerankPhotoCandidates(matchingMetadata, q)
+        : matchingMetadata.sort((a, b) => b.score - a.score || +new Date(b.photo.createdAt) - +new Date(a.photo.createdAt));
+      const filtered = ordered
         .map(({ photo, score }) => ({ ...photo, score, url: `${url.origin}/api/photos/${photo.id}/file` }));
       return json({ photos: filtered, count: filtered.length, storage: 'drive9' });
     }
