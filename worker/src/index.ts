@@ -119,6 +119,9 @@ async function sha256(buf: ArrayBuffer) {
 function tokenize(input: string) {
   return input.toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean);
 }
+function containsChinese(input: string) {
+  return /[\u4e00-\u9fa5]/.test(input);
+}
 function drive9Base(env: Env) {
   return (env.DRIVE9_SERVER || 'https://api.drive9.ai').replace(/\/$/, '');
 }
@@ -314,7 +317,11 @@ function scorePhoto(photo: Photo, q: string) {
   ].join(' ').toLowerCase();
   const words = tokenize(q);
   if (!words.length) return 1;
-  return words.reduce((s, w) => s + (hay.includes(w) ? 1 : 0), 0) / words.length;
+  const hayWords = new Set(tokenize(hay));
+  return words.reduce((score, word) => {
+    const matches = containsChinese(word) ? hay.includes(word) : hayWords.has(word);
+    return score + (matches ? 1 : 0);
+  }, 0) / words.length;
 }
 
 
@@ -577,5 +584,5 @@ async function handle(req: Request, env: Env): Promise<Response> {
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
-export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
+export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, scorePhoto, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
 export default { fetch: handle };

@@ -5,9 +5,40 @@ import {
   effectiveVideoMime,
   mediaKindFromMime,
   inferMediaKind,
+  scorePhoto,
   VIDEO_SIZE_LIMIT,
   IMAGE_SIZE_LIMIT,
 } from '../dist/index.js';
+
+function photoWithText(text) {
+  return {
+    title: '',
+    note: '',
+    album: '',
+    tags: [],
+    owner: '',
+    aiCaptionEn: text,
+    aiCaptionZh: '',
+    aiTextEn: '',
+    aiTextZh: '',
+    aiTagsEn: [],
+    aiTagsZh: [],
+  };
+}
+
+test('scorePhoto matches complete English words', () => {
+  assert.equal(scorePhoto(photoWithText('A ginger cat beside a window.'), 'cat'), 1);
+  assert.equal(scorePhoto(photoWithText('A USB-C adapter on a desk.'), 'usb adapter'), 1);
+});
+
+test('scorePhoto does not match English query substrings inside other words', () => {
+  assert.equal(scorePhoto(photoWithText('Location indicators are scattered.'), 'cat'), 0);
+});
+
+test('scorePhoto keeps substring matching for Chinese phrases', () => {
+  assert.equal(scorePhoto(photoWithText('一只橘猫坐在窗边。'), '橘猫'), 1);
+  assert.equal(scorePhoto(photoWithText('一只橘猫坐在窗边。'), '黑猫'), 0);
+});
 
 // -- effectiveVideoMime --
 
