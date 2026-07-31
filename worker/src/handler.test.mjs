@@ -115,6 +115,13 @@ async function uploadFile(name, type, data) {
   return { status: res.status, body: await res.json() };
 }
 
+function updatePhotoMeta(photo, patch) {
+  const path = `/photovault/meta/${photo.id}.json`;
+  const stored = drive9Store.get(path);
+  assert.equal(typeof stored, 'string', `missing metadata for ${photo.id}`);
+  drive9Store.set(path, JSON.stringify({ ...JSON.parse(stored), ...patch }));
+}
+
 // -- Upload validation --
 
 test('POST /api/photos rejects unsupported MIME type with 400', async () => {
@@ -171,6 +178,8 @@ test('GET /api/photos uses ranked Drive9 search paths', async () => {
   resetState();
   const cat = await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(10));
   const adapter = await uploadFile('adapter.jpg', 'image/jpeg', new Uint8Array(10));
+  const unreturned = await uploadFile('unreturned.jpg', 'image/jpeg', new Uint8Array(10));
+  updatePhotoMeta(unreturned.body.photo, { aiTagsEn: ['feline pet'], aiTextEn: 'feline pet' });
   drive9SearchRows = [
     { path: cat.body.photo.objectKey, score: 0.8 },
     { path: '/outside/photovault.jpg', score: 0.7 },
@@ -186,6 +195,72 @@ test('GET /api/photos uses ranked Drive9 search paths', async () => {
   assert.equal(lastDrive9SearchURL.pathname, '/v1/fs/photovault/photos/');
   assert.equal(lastDrive9SearchURL.searchParams.get('grep'), 'feline pet');
   assert.equal(lastDrive9SearchURL.searchParams.get('limit'), '100');
+});
+
+test('GET /api/photos reranks only Drive9 candidates with structured semantic fields', async () => {
+  resetState();
+  const cat = await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(10));
+  const catEars = await uploadFile('cat-ears.jpg', 'image/jpeg', new Uint8Array(10));
+  const autumn = await uploadFile('autumn.jpg', 'image/jpeg', new Uint8Array(10));
+  const unreturnedCat = await uploadFile('unreturned-cat.jpg', 'image/jpeg', new Uint8Array(10));
+  updatePhotoMeta(cat.body.photo, {
+    aiCaptionZh: '一只橘猫正视镜头，画面聚焦于猫脸特写。',
+    aiTagsZh: ['橘猫', '宠物猫', '猫咪表情'],
+    aiTextZh: '一只橘猫正视镜头。',
+  });
+  updatePhotoMeta(catEars.body.photo, {
+    aiCaptionZh: '四名Q版动漫少女角色并排站立。',
+    aiTagsZh: ['猫耳', '动漫角色'],
+    aiTextZh: '动漫角色佩戴猫耳耳机。',
+  });
+  updatePhotoMeta(autumn.body.photo, {
+    aiCaptionZh: '秋日林间公路。',
+    aiTagsZh: ['秋日', '公路'],
+    aiTextZh: '秋日林间公路。',
+  });
+  updatePhotoMeta(unreturnedCat.body.photo, {
+    aiCaptionZh: '一只可爱的橘猫。',
+    aiTagsZh: ['橘猫'],
+    aiTextZh: '一只可爱的橘猫。',
+  });
+  drive9SearchRows = [
+    { path: catEars.body.photo.objectKey, score: 0.9 },
+    { path: cat.body.photo.objectKey, score: 0.8 },
+    { path: autumn.body.photo.objectKey, score: 0.7 },
+  ];
+
+  const res = await handler(new Request('http://localhost/api/photos?q=%E4%B8%80%E5%8F%AA%E5%8F%AF%E7%88%B1%E7%9A%84%E6%A9%98%E7%8C%AB'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.photos.map((photo) => photo.id), [cat.body.photo.id]);
+  assert.equal(body.photos[0].score, 0.8);
+  assert.ok(!body.photos.some((photo) => photo.id === unreturnedCat.body.photo.id));
+});
+
+test('GET /api/photos applies metadata filters before the search result limit', async () => {
+  resetState();
+  const photos = [];
+  for (let index = 0; index < 13; index++) {
+    const upload = await uploadFile(`autumn-${index}.jpg`, 'image/jpeg', new Uint8Array(10));
+    const photo = upload.body.photo;
+    updatePhotoMeta(photo, {
+      aiTagsEn: ['autumn'],
+      aiTextEn: 'autumn',
+      favorite: index === 12,
+    });
+    photos.push(photo);
+  }
+  drive9SearchRows = photos.map((photo, index) => ({
+    path: photo.objectKey,
+    score: 1 - index / 100,
+  }));
+
+  const res = await handler(new Request('http://localhost/api/photos?q=autumn&favorite=true'), env);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.photos.map((photo) => photo.id), [photos[12].id]);
 });
 
 test('GET /api/photos treats a null Drive9 search response as no matches', async () => {
