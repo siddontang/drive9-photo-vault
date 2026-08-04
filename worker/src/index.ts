@@ -284,7 +284,6 @@ function photoForShare(p: Photo, origin: string, token: string) {
     aiCaptionZh: p.aiCaptionZh || '',
     aiTagsEn: p.aiTagsEn || [],
     aiTagsZh: p.aiTagsZh || [],
-    analysisStatus: p.analysisStatus,
     url: `${origin}/api/shares/${token}/file`,
   };
 }

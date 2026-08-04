@@ -352,7 +352,7 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   const shared = (await metadata.json()).photo;
   assert.equal(shared.title, 'shared');
   assert.equal(shared.url, `http://localhost/api/shares/${created.share.token}/file`);
-  for (const internalField of ['id', 'owner', 'objectKey', 'checksum', 'shareToken', 'favorite', 'archived', 'note', 'album', 'createdAt']) {
+  for (const internalField of ['id', 'owner', 'objectKey', 'checksum', 'shareToken', 'favorite', 'archived', 'note', 'album', 'createdAt', 'analysisStatus']) {
     assert.equal(internalField in shared, false, `shared metadata must not expose ${internalField}`);
   }
 
