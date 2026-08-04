@@ -325,6 +325,101 @@ test('GET /api/photos rejects an invalid Drive9 search response', async () => {
   assert.equal(body.error, 'drive9 search returned an invalid response');
 });
 
+// -- Public single-item share links --
+
+test('POST /api/photos/:id/share creates an unguessable share without leaking internal fields', async () => {
+  resetState();
+  const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+  const { body: { photo } } = await uploadFile('shared.jpg', 'image/jpeg', bytes);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+  const created = await create.json();
+  assert.match(created.share.token, /^[A-Za-z0-9_-]{32}$/);
+  assert.equal(created.share.url, `http://localhost/api/shares/${created.share.token}`);
+
+  const second = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal((await second.json()).share.token, created.share.token, 'the current link should be reused');
+
+  const list = await handler(new Request('http://localhost/api/photos'), env);
+  const listed = (await list.json()).photos.find((candidate) => candidate.id === photo.id);
+  assert.equal(listed.shared, true);
+  assert.equal('shareToken' in listed, false, 'management responses must not expose the token');
+
+  const metadata = await handler(new Request(created.share.url), env);
+  assert.equal(metadata.status, 200);
+  assert.equal(metadata.headers.get('cache-control'), 'no-store');
+  const shared = (await metadata.json()).photo;
+  assert.equal(shared.title, 'shared');
+  assert.equal(shared.url, `http://localhost/api/shares/${created.share.token}/file`);
+  for (const internalField of ['id', 'owner', 'objectKey', 'checksum', 'shareToken', 'favorite', 'archived', 'note', 'album', 'createdAt']) {
+    assert.equal(internalField in shared, false, `shared metadata must not expose ${internalField}`);
+  }
+
+  const file = await handler(new Request(shared.url), env);
+  assert.equal(file.status, 200);
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), bytes);
+  assert.equal(file.headers.get('cache-control'), 'private, no-store');
+
+  const range = await handler(new Request(shared.url, { headers: { range: 'bytes=1-3' } }), env);
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get('content-range'), 'bytes 1-3/5');
+  assert.equal(range.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(new Uint8Array(await range.arrayBuffer()), bytes.slice(1, 4));
+});
+
+test('GET /api/shares/:token returns the same 404 for invalid, unshared, and revoked links', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.jpg', 'image/jpeg', new Uint8Array(8));
+  const validLookingToken = 'A'.repeat(32);
+
+  for (const path of [`/api/shares/${photo.id}`, `/api/shares/${validLookingToken}`]) {
+    const response = await handler(new Request(`http://localhost${path}`), env);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), { error: 'share not found' });
+  }
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  const token = (await create.json()).share.token;
+  const revoke = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'DELETE' }), env);
+  assert.equal(revoke.status, 204);
+
+  for (const suffix of ['', '/file']) {
+    const response = await handler(new Request(`http://localhost/api/shares/${token}${suffix}`), env);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), { error: 'share not found' });
+  }
+});
+
+test('archiving or deleting a photo invalidates its share link', async () => {
+  resetState();
+  const first = await uploadFile('archived.jpg', 'image/jpeg', new Uint8Array(8));
+  const firstShare = await handler(new Request(`http://localhost/api/photos/${first.body.photo.id}/share`, { method: 'POST' }), env);
+  const firstToken = (await firstShare.json()).share.token;
+  const archive = await handler(new Request(`http://localhost/api/photos/${first.body.photo.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ archived: true }),
+  }), env);
+  assert.equal(archive.status, 200);
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${firstToken}`), env)).status, 404);
+  await handler(new Request(`http://localhost/api/photos/${first.body.photo.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ archived: false }),
+  }), env);
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${firstToken}`), env)).status, 404, 'unarchiving must not reactivate the old link');
+
+  const second = await uploadFile('deleted.jpg', 'image/jpeg', new Uint8Array(8));
+  const secondShare = await handler(new Request(`http://localhost/api/photos/${second.body.photo.id}/share`, { method: 'POST' }), env);
+  const secondToken = (await secondShare.json()).share.token;
+  const remove = await handler(new Request(`http://localhost/api/photos/${second.body.photo.id}`, { method: 'DELETE' }), env);
+  assert.equal(remove.status, 204);
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${secondToken}`), env)).status, 404);
+});
+
 // -- File proxy / Range --
 
 test('GET /api/photos/:id/file proxies 200 with accept-ranges from upstream', async () => {

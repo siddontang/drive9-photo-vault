@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { Check, Heart, Play, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { Check, Heart, Link2Off, Play, Plus, Search, Share2, Trash2, Upload } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
+import { isSharePath, sharePageUrl, shareTokenFromPath } from './shareLink.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
 const apiUrl = (path) => `${API}${path}`;
@@ -40,6 +41,25 @@ function normalizeTags(values) {
     .flatMap((value) => String(value || '').split(','))
     .map((x) => x.trim())
     .filter(Boolean))].slice(0, 24);
+}
+
+async function copyText(value) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {}
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand?.('copy') || false;
+  textarea.remove();
+  return copied;
 }
 
 function TagEditor({ photo, tags, addDraft, removing, t, onFilter, onAddDraft, onAdd, onRemove, onToggleRemove, expanded, onToggleExpanded }) {
@@ -105,6 +125,56 @@ function LangSwitch({ lang, setLang, t }) {
   </div>;
 }
 
+function SharedPhotoPage({ token }) {
+  const { lang, setLang, t } = useLang();
+  const [photo, setPhoto] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(apiUrl(`/api/shares/${token}`), { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('share unavailable');
+        return response.json();
+      })
+      .then((payload) => setPhoto(payload.photo))
+      .catch((reason) => {
+        if (reason?.name !== 'AbortError') setError(t.shareUnavailable);
+      });
+    return () => controller.abort();
+  }, [token]);
+
+  const caption = photo ? pickLangField(photo, lang, 'aiCaption') : '';
+  const tags = photo ? pickLangTags(photo, lang) : [];
+  const video = photo && isVideo(photo);
+
+  return <main className="sharedPage">
+    <header className="topbar sharedTopbar">
+      <div>
+        <h1>PhotoVault</h1>
+        <p>{t.sharedPhoto}</p>
+      </div>
+      <LangSwitch lang={lang} setLang={setLang} t={t} />
+    </header>
+    {error && <section className="sharedUnavailable">{error}</section>}
+    {!error && !photo && <section className="sharedUnavailable">{t.loadingShare}</section>}
+    {photo && <article className="sharedMedia">
+      {video ? (
+        <video src={apiUrl(`/api/shares/${token}/file`)} controls playsInline preload="metadata" />
+      ) : (
+        <img src={apiUrl(`/api/shares/${token}/file`)} alt={photo.title} />
+      )}
+      <div className="sharedInfo">
+        <h2>{photo.title}</h2>
+        <div className="sub">{fmtBytes(photo.size)}</div>
+        {caption && <p className="sharedCaption">{caption}</p>}
+        {!!tags.length && <div className="sharedTags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+      </div>
+    </article>}
+    <footer className="footer">{t.poweredBy} <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
+  </main>;
+}
+
 function App() {
   const { lang, setLang, t } = useLang();
   const [photos, setPhotos] = useState([]);
@@ -121,6 +191,8 @@ function App() {
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '' });
   const [lightboxId, setLightboxId] = useState(null);
+  const [shareBusyId, setShareBusyId] = useState(null);
+  const [shareNotice, setShareNotice] = useState(null);
   const photoLoadGate = useRef(null);
   if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate(q, tag);
   photoLoadGate.current.setSearch(q, tag);
@@ -271,6 +343,38 @@ function App() {
     await fetch(apiUrl(`/api/photos/${id}`), { method: 'DELETE' });
     await load();
   }
+  async function sharePhoto(photo) {
+    setShareBusyId(photo.id);
+    setError('');
+    try {
+      const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'POST' });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
+      const link = sharePageUrl(window.location.origin, payload.share.token);
+      const copied = await copyText(link);
+      if (!copied) window.prompt(t.copySharePrompt, link);
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true } : item));
+      setShareNotice({ id: photo.id, text: copied ? t.shareCopied : t.shareReady });
+    } catch (reason) {
+      setError(t.shareFailed(reason?.message || reason));
+    } finally {
+      setShareBusyId(null);
+    }
+  }
+  async function unsharePhoto(photo) {
+    setShareBusyId(photo.id);
+    setError('');
+    try {
+      const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'DELETE' });
+      if (!response.ok) throw new Error(await response.text());
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: false } : item));
+      setShareNotice({ id: photo.id, text: t.shareRevoked });
+    } catch (reason) {
+      setError(t.shareFailed(reason?.message || reason));
+    } finally {
+      setShareBusyId(null);
+    }
+  }
 
   const totals = collections?.totals || { photos: 0, favorites: 0, bytes: 0 };
   const tags = collections?.tags || [];
@@ -373,7 +477,12 @@ function App() {
               expanded={!!expandedTags[p.id]}
               onToggleExpanded={() => setExpandedTags({ ...expandedTags, [p.id]: !expandedTags[p.id] })}
             />
-            <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> {t.delete}</button>
+            <div className="photoActions">
+              <button className="shareAction" disabled={shareBusyId === p.id} onClick={() => sharePhoto(p)}><Share2 size={15} /> {p.shared ? t.copyShareLink : t.share}</button>
+              {p.shared && <button className="unshareAction" disabled={shareBusyId === p.id} onClick={() => unsharePhoto(p)}><Link2Off size={15} /> {t.unshare}</button>}
+              <button className="delete" onClick={() => remove(p.id)}><Trash2 size={15} /> {t.delete}</button>
+            </div>
+            {shareNotice?.id === p.id && <div className="shareNotice">{shareNotice.text}</div>}
           </div>
         </article>;
       })}
@@ -396,4 +505,5 @@ function App() {
   </main>;
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const shareToken = shareTokenFromPath(window.location.pathname);
+createRoot(document.getElementById('root')).render(isSharePath(window.location.pathname) ? <SharedPhotoPage token={shareToken || ''} /> : <App />);
