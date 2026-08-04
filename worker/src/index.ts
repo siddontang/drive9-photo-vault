@@ -299,9 +299,14 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
     } else if (analysis.status === 'unavailable') {
       // Drive9 finished but produced no usable semantic content. Record the
       // terminal 'unavailable' state so the image stops showing as pending and
-      // isn't re-polled forever.
+      // isn't re-polled forever. Clear the placeholder "still analyzing…" caption
+      // written at upload, otherwise the UI (which renders any caption once the
+      // status is non-pending) would show both "analysis unavailable" AND the
+      // stale analyzing summary.
       if (p.analysisStatus !== 'unavailable') {
         p.analysisStatus = 'unavailable';
+        p.aiCaptionEn = '';
+        p.aiCaptionZh = '';
         p.updatedAt = new Date().toISOString();
         changed = true;
       }
@@ -342,12 +347,13 @@ async function getDrive9Semantic(env: Env, path: string, existingTags: string[])
     const analysis = buildDrive9SemanticResult(meta, existingTags);
     if (analysis) return analysis;
     // Drive9 responded, but no usable semantic content could be recovered. If
-    // drive9 nonetheless produced a semantic_text field (i.e. it DID run — the
-    // text was empty, or truncated so badly not even one field survived), the
-    // analysis is finished-but-empty. Reporting 'pending' here would leave the
-    // image "analyzing…" forever; report 'unavailable' so the UI shows a clear
-    // terminal state instead of a stuck spinner.
-    if (drive9SemanticFieldPresent(meta)) {
+    // drive9 nonetheless produced NON-EMPTY semantic_text (i.e. it DID run and
+    // emitted content that was truncated so badly not even one field survived),
+    // the analysis is finished-but-unusable. Reporting 'pending' here would leave
+    // the image "analyzing…" forever; report 'unavailable' so the UI shows a
+    // clear terminal state. An EMPTY semantic_text means analysis has not run yet
+    // (drive9 always serializes the field) — that stays 'pending'.
+    if (drive9SemanticContentPresent(meta)) {
       return {
         caption: { zh: '', en: '' },
         text: { zh: '', en: '' },
@@ -364,12 +370,20 @@ async function getDrive9Semantic(env: Env, path: string, existingTags: string[])
   };
 }
 
-// True when drive9's metadata carries a semantic_text field at all — meaning
-// analysis has RUN (even if it produced empty/unparseable content), as opposed
-// to still being queued/in-progress with no semantic_text yet.
-function drive9SemanticFieldPresent(meta: unknown): boolean {
+// True when drive9's metadata carries NON-EMPTY semantic content — meaning
+// analysis actually produced output (even if that output is truncated/unparseable
+// so nothing usable survived). drive9's stat response always serializes a
+// `semantic_text` field (empty string for objects that have not been analyzed
+// yet), so the mere presence of the key does NOT mean analysis finished — only a
+// non-empty value does. Using presence would wrongly flip freshly-uploaded,
+// still-pending images to a terminal 'unavailable'.
+export function drive9SemanticContentPresent(meta: unknown): boolean {
   if (!meta || typeof meta !== 'object') return false;
-  return 'semantic_text' in (meta as Record<string, unknown>);
+  const value = (meta as Record<string, unknown>).semantic_text;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some((v) => typeof v === 'string' && v.trim().length > 0);
+  // An object-shaped semantic_text with any keys also counts as produced content.
+  return !!value && typeof value === 'object' && Object.keys(value as object).length > 0;
 }
 type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
 type Drive9PresignedPart = { number: number; url: string; size: number; headers?: Record<string, string> };

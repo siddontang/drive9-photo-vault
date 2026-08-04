@@ -333,3 +333,21 @@ test('valid JSON semantic_text is unchanged by the truncation-recovery path', ()
   assert.deepEqual(result?.tags.en, ['cat', 'sofa']);
   assert.deepEqual(result?.tags.zh, ['猫', '沙发']);
 });
+
+// task #6 REVISE (adversary-1): a single COMPLETE top-level field with no trailing
+// comma and no closing brace must still be recovered — previously it returned null
+// because a boundary was only recorded at commas / nested closes, dropping a
+// complete scalar value. Contract: keep complete fields, drop only the half tail.
+test('truncated JSON recovers a complete scalar field with no trailing comma', () => {
+  const result = buildDrive9SemanticResult({ semantic_text: '{"caption_en":"Sunset over the sea"', tags: {} });
+  assert.ok(result, 'a single complete field (no comma/close) must be recovered, not dropped');
+  assert.equal(result?.caption.en, 'Sunset over the sea');
+});
+
+test('truncated JSON recovers a complete array field with no trailing comma', () => {
+  // tags_en fully closed by ], but object never closed and no next comma.
+  const result = buildDrive9SemanticResult({ semantic_text: '{"caption_en":"Cat","tags_en":["cat","sofa"]', tags: {} });
+  assert.ok(result);
+  assert.equal(result?.caption.en, 'Cat');
+  assert.deepEqual(result?.tags.en, ['cat', 'sofa']);
+});

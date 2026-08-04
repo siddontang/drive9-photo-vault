@@ -401,9 +401,13 @@ function repairTruncatedJsonObject(raw: string): string | null {
   let inString = false;
   let escaped = false;
   let depth = 0;
-  // Index (exclusive) of the end of the last COMPLETE top-level pair — i.e. the
-  // position right after a value that closed back to depth 1 outside a string,
-  // or right after the `{` when nothing complete yet.
+  // Whether, at depth 1, the current string/scalar is a VALUE (we have passed a
+  // `:` for the current key). A value that completes marks a safe boundary; a key
+  // that completes does not (its value hasn't arrived yet).
+  let afterColonAtTop = false;
+  // Index (exclusive) of the end of the last COMPLETE top-level `"key": value`
+  // pair. Includes complete scalar values that were never followed by a comma
+  // (the `{"caption_en":"..."` truncation case), not just comma/close boundaries.
   let lastSafeEnd = -1;
 
   for (let i = 0; i < text.length; i++) {
@@ -412,12 +416,21 @@ function repairTruncatedJsonObject(raw: string): string | null {
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
+      else if (ch === '"') {
+        inString = false;
+        // A string just closed. At depth 1, if it was a value string, the pair
+        // is complete up to and including this closing quote.
+        if (depth === 1 && afterColonAtTop) lastSafeEnd = i + 1;
+      }
       continue;
     }
 
     if (ch === '"') {
       inString = true;
+      continue;
+    }
+    if (ch === ':' && depth === 1) {
+      afterColonAtTop = true; // the value for the current top-level key begins
       continue;
     }
     if (ch === '{' || ch === '[') {
@@ -426,12 +439,15 @@ function repairTruncatedJsonObject(raw: string): string | null {
     }
     if (ch === '}' || ch === ']') {
       depth--;
-      if (depth === 1) lastSafeEnd = i + 1; // a nested value just closed
+      if (depth === 1) lastSafeEnd = i + 1; // a nested top-level value just closed
       if (depth === 0) return text.slice(0, i + 1); // whole object is actually intact
       continue;
     }
     if (ch === ',' && depth === 1) {
-      lastSafeEnd = i; // boundary between complete top-level pairs (before the comma)
+      // Boundary between top-level pairs. Covers scalar values (number/bool/null)
+      // that end at the comma without their own close token.
+      lastSafeEnd = i;
+      afterColonAtTop = false;
       continue;
     }
   }
@@ -442,8 +458,9 @@ function repairTruncatedJsonObject(raw: string): string | null {
   const head = text.slice(0, lastSafeEnd).replace(/,\s*$/, '');
   const closed = `${head}}`;
   // Sanity: only return something that could plausibly parse (has at least one
-  // "key": value pair).
-  return /"[^"]+"\s*:/.test(closed) ? closed : null;
+  // "key": value pair) and actually parses.
+  if (!/"[^"]+"\s*:/.test(closed)) return null;
+  return closed;
 }
 
 function jsonObjectCandidate(raw: string): string {

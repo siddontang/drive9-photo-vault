@@ -7,7 +7,30 @@ import {
   inferMediaKind,
   VIDEO_SIZE_LIMIT,
   IMAGE_SIZE_LIMIT,
+  drive9SemanticContentPresent,
 } from '../dist/index.js';
+
+// task #6 REVISE (adversary-1, blocker 1): drive9 stat ALWAYS serializes a
+// semantic_text field — empty string for objects that have not been analyzed
+// yet. Marking "analysis finished" on mere presence flips freshly-uploaded,
+// still-pending images to a terminal 'unavailable' and stops re-polling. Only a
+// NON-EMPTY semantic_text means drive9 actually produced output.
+test('empty/absent semantic_text is NOT treated as produced content (stays pending)', () => {
+  assert.equal(drive9SemanticContentPresent({ semantic_text: '' }), false);
+  assert.equal(drive9SemanticContentPresent({ semantic_text: '   ' }), false);
+  assert.equal(drive9SemanticContentPresent({}), false);
+  assert.equal(drive9SemanticContentPresent({ semantic_text: [] }), false);
+  assert.equal(drive9SemanticContentPresent({ semantic_text: ['', '  '] }), false);
+  assert.equal(drive9SemanticContentPresent(null), false);
+});
+
+test('non-empty semantic_text counts as produced content (eligible for unavailable)', () => {
+  // A truncated tail that yields nothing usable is still "produced" — drive9 ran,
+  // so the terminal state is 'unavailable', not perpetual pending.
+  assert.equal(drive9SemanticContentPresent({ semantic_text: '{"caption_en":"Half a capti' }), true);
+  assert.equal(drive9SemanticContentPresent({ semantic_text: ['英文摘要：Sunset'] }), true);
+  assert.equal(drive9SemanticContentPresent({ semantic_text: { caption_en: 'x' } }), true);
+});
 
 // -- effectiveVideoMime --
 
