@@ -7,6 +7,9 @@ const drive9Store = new Map();  // path → Uint8Array | string body
 let drive9SearchRows = [];
 let drive9SearchStatus = 200;
 let lastDrive9SearchURL = null;
+// Per-path override for the ?stat=1 response. Default (no override) is the
+// production-realistic "not analyzed yet" stat: an empty semantic_text field.
+const drive9StatOverride = new Map();  // fsPath → stat JSON object
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
@@ -37,7 +40,8 @@ globalThis.fetch = async (url, opts = {}) => {
 
   // Stat endpoint (must check before generic GET)
   if (method === 'GET' && fsPath && u.includes('?stat=1')) {
-    return new Response(JSON.stringify({ semantic_text: '' }), { status: 200 });
+    const override = drive9StatOverride.get(fsPath);
+    return new Response(JSON.stringify(override ?? { semantic_text: '' }), { status: 200 });
   }
 
   if (method === 'GET' && fsPath) {
@@ -104,6 +108,17 @@ function resetState() {
   drive9SearchRows = [];
   drive9SearchStatus = 200;
   lastDrive9SearchURL = null;
+  drive9StatOverride.clear();
+}
+
+// The objectKey a POST /api/photos upload maps to on Drive9. The worker stores
+// uploads under /photos/<id>.<ext>; we discover it from the store so the stat
+// override targets the exact stat path the refresh will query.
+function drive9ObjectPath(photoId) {
+  for (const key of drive9Store.keys()) {
+    if (key.includes(photoId)) return key;
+  }
+  return null;
 }
 
 // Helper: upload a file and return the response body
@@ -358,4 +373,70 @@ test('GET /api/collections returns separate image and video counts', async () =>
   assert.equal(body.totals.images, 1);
   assert.equal(body.totals.videos, 1);
   assert.equal(body.totals.photos, 2);
+});
+
+// -- Semantic refresh: Drive9 tags-only result must be persisted, not dropped --
+
+// task #6 REVISE (adversary-1, blocker 4): Drive9 can finish with usable image
+// tags (drive9.image.tag.en.*) but no caption/description text — e.g. when the
+// semantic_text tail is truncated so no caption survives. The persist gate used
+// to require caption text (analysis.text.*), so those real tags were dropped and
+// the image stayed 'pending' forever. This is the exact task-title scenario:
+// "show usable tags, don't pend". Reproduced through the real handler path.
+test('GET /api/photos persists Drive9 tags-only result (no caption text) instead of staying pending', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('cat.jpg', 'image/jpeg', new Uint8Array(64));
+  assert.equal(photo.analysisStatus, 'pending');
+
+  // Drive9 finished: non-empty but unrecoverable semantic_text (no caption/
+  // description survives) PLUS real image tags. Target the exact stat path.
+  const statPath = drive9ObjectPath(photo.id);
+  assert.ok(statPath, 'uploaded object path should be discoverable');
+  drive9StatOverride.set(statPath, {
+    semantic_text: '{"caption_en":"a cat on a so',  // truncated mid-value → no caption recovered
+    tags: {
+      'drive9.image.tag.en.0': 'cat',
+      'drive9.image.tag.en.1': 'sofa',
+      'drive9.image.tag.zh.0': '猫',
+      'drive9.image.tag.zh.1': '沙发',
+    },
+  });
+
+  const res = await handler(new Request('http://localhost/api/photos'), env);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const got = body.photos.find((p) => p.id === photo.id);
+  assert.ok(got, 'photo should be listed');
+
+  // The real Drive9 tags must surface — not dropped, not pending, not unavailable.
+  assert.equal(got.analysisStatus, 'drive9');
+  assert.deepEqual(got.aiTagsEn, ['cat', 'sofa']);
+  assert.deepEqual(got.aiTagsZh, ['猫', '沙发']);
+  assert.deepEqual(got.tags, ['cat', 'sofa']);
+  // No fabricated caption from the truncated half-value.
+  assert.equal(got.aiCaptionEn, '');
+  assert.doesNotMatch((got.aiCaptionEn || '') + (got.aiTextEn || ''), /a cat on a so/);
+});
+
+test('GET /api/photos does not re-poll a persisted Drive9 tags-only result', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('cat2.jpg', 'image/jpeg', new Uint8Array(64));
+  const statPath = drive9ObjectPath(photo.id);
+  drive9StatOverride.set(statPath, {
+    semantic_text: '{"caption_en":"trunc',
+    tags: { 'drive9.image.tag.en.0': 'dog' },
+  });
+
+  // First list persists the tags-only 'drive9' state.
+  await handler(new Request('http://localhost/api/photos'), env);
+
+  // Drive9 stat now regresses to empty (as if a later poll saw nothing). A
+  // terminal 'drive9' result must NOT be re-polled and downgraded — the tags
+  // stay put.
+  drive9StatOverride.set(statPath, { semantic_text: '' });
+  const res = await handler(new Request('http://localhost/api/photos'), env);
+  const body = await res.json();
+  const got = body.photos.find((p) => p.id === photo.id);
+  assert.equal(got.analysisStatus, 'drive9');
+  assert.deepEqual(got.aiTagsEn, ['dog']);
 });

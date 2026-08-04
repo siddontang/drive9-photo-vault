@@ -277,15 +277,26 @@ async function refreshDrive9Semantics(env: Env, photos: Photo[], limit = 20) {
   let checked = 0;
   for (const p of photos) {
     if (checked >= limit) break;
-    // 'unavailable' is terminal (drive9 finished with no usable content) — don't
-    // re-poll it forever just because it has no aiText.
+    // 'unavailable' (drive9 finished, no usable content) and 'drive9' (drive9
+    // finished and returned content) are both terminal — don't re-poll them
+    // forever just because there is no caption text. A 'drive9' result may be
+    // tags-only (aiTextEn/Zh empty), so gating solely on aiText would re-poll a
+    // finished image endlessly.
     const needs =
       p.analysisStatus !== 'unavailable' &&
+      p.analysisStatus !== 'drive9' &&
       ((!p.aiTextEn && !p.aiTextZh) || p.analysisStatus === 'pending');
     if (!needs || p.archived) continue;
     checked++;
     const analysis = await getDrive9Semantic(env, p.objectKey, p.tags);
-    if (analysis.text.en || analysis.text.zh) {
+    // Persist whenever Drive9 produced ANY usable content — a result may carry
+    // real Drive9 tags (from drive9.image.tag.*) with no caption/description
+    // text. Gating on caption text alone (analysis.text.*) would drop those
+    // tags-only results on the floor and leave the image stuck 'pending' even
+    // though Drive9 finished and returned tags. `buildDrive9SemanticResult`
+    // already returns null unless some Drive9-derived field was recovered, so a
+    // 'drive9' status means there is at least one field worth persisting.
+    if (analysis.status === 'drive9') {
       p.aiCaptionEn = analysis.caption.en;
       p.aiCaptionZh = analysis.caption.zh;
       p.aiTextEn = analysis.text.en.slice(0, 1100);
