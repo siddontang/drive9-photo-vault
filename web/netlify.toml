@@ -13,6 +13,20 @@
   [headers.values]
     Cache-Control = "no-cache, must-revalidate"
 
+[[headers]]
+  for = "/s/*"
+  [headers.values]
+    Cache-Control = "no-cache, must-revalidate"
+    Referrer-Policy = "no-referrer"
+    X-Robots-Tag = "noindex, noarchive"
+
+[[headers]]
+  for = "/share/*"
+  [headers.values]
+    Cache-Control = "no-cache, must-revalidate"
+    Referrer-Policy = "no-referrer"
+    X-Robots-Tag = "noindex, noarchive"
+
 # Fingerprinted Vite assets are safe to cache aggressively.
 [[headers]]
   for = "/assets/*"
