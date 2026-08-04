@@ -266,3 +266,88 @@ test('drive9.video.* system tags are filtered from display', () => {
   }, []);
   assert.deepEqual(tagsEn, ['sunset']);
 });
+
+// task #6: Drive9 semantic_text is LLM-produced and can be cut off mid-object.
+// A truncated tail must NOT discard the fields that arrived complete — otherwise
+// the image is stuck showing "pending" even though Drive9 finished useful work.
+test('truncated JSON semantic_text still exposes the complete leading fields', () => {
+  const full = JSON.stringify({
+    caption_zh: '猫在沙发上',
+    caption_en: 'Cat on a sofa',
+    tags_zh: ['猫', '沙发', '客厅'],
+    tags_en: ['cat', 'gray sofa', 'living room'],
+    description_en: 'A cat rests on a gray sofa in a living roo', // will be cut
+  });
+  // Cut the JSON somewhere inside the last (description_en) value: everything
+  // before it (caption_zh/en, tags_zh/en) is complete, the tail is half-emitted.
+  const truncated = full.slice(0, full.indexOf('"description_en"') + 40);
+
+  const result = buildDrive9SemanticResult({ semantic_text: truncated, tags: {} });
+
+  // The complete fields must survive (this is the bug fix — previously null → pending).
+  assert.ok(result, 'truncated JSON must not collapse to null');
+  assert.equal(result?.caption.en, 'Cat on a sofa');
+  assert.equal(result?.caption.zh, '猫在沙发上');
+  assert.deepEqual(result?.tags.en, ['cat', 'gray sofa', 'living room']);
+  assert.deepEqual(result?.tags.zh, ['猫', '沙发', '客厅']);
+  assert.equal(result?.status, 'drive9');
+});
+
+test('truncated JSON never invents the half-emitted field', () => {
+  // Only caption_en is complete; description_en is cut mid-string. We must show
+  // the complete caption but NOT fabricate a description from the partial tail.
+  const truncated = '{"caption_en":"Sunset over the sea","description_en":"The sun sinks belo';
+  const result = buildDrive9SemanticResult({ semantic_text: truncated, tags: {} });
+  assert.ok(result, 'a single complete field is enough to escape pending');
+  assert.equal(result?.caption.en, 'Sunset over the sea');
+  // The partial description must not leak in as a real value.
+  assert.doesNotMatch(result?.text.en || '', /sun sinks belo/);
+});
+
+test('no semantic_text yields null (caller shows "unavailable", never fake tags)', () => {
+  assert.equal(buildDrive9SemanticResult({ tags: {} }), null);
+  assert.equal(buildDrive9SemanticResult({ semantic_text: '' }), null);
+  assert.equal(buildDrive9SemanticResult({ semantic_text: null }), null);
+});
+
+test('truncation with no complete pair still yields null (does not guess)', () => {
+  // The very first value is cut mid-string; nothing complete → null (unavailable),
+  // not a fabricated partial.
+  const result = buildDrive9SemanticResult({ semantic_text: '{"caption_en":"Half a capti', tags: {} });
+  assert.equal(result, null);
+});
+
+test('valid JSON semantic_text is unchanged by the truncation-recovery path', () => {
+  // Regression guard: the existing happy path must not degrade.
+  const result = buildDrive9SemanticResult({
+    semantic_text: JSON.stringify({
+      caption_en: 'Cat on a sofa',
+      caption_zh: '猫在沙发上',
+      tags_en: ['cat', 'sofa'],
+      tags_zh: ['猫', '沙发'],
+    }),
+    tags: {},
+  });
+  assert.equal(result?.caption.en, 'Cat on a sofa');
+  assert.equal(result?.caption.zh, '猫在沙发上');
+  assert.deepEqual(result?.tags.en, ['cat', 'sofa']);
+  assert.deepEqual(result?.tags.zh, ['猫', '沙发']);
+});
+
+// task #6 REVISE (adversary-1): a single COMPLETE top-level field with no trailing
+// comma and no closing brace must still be recovered — previously it returned null
+// because a boundary was only recorded at commas / nested closes, dropping a
+// complete scalar value. Contract: keep complete fields, drop only the half tail.
+test('truncated JSON recovers a complete scalar field with no trailing comma', () => {
+  const result = buildDrive9SemanticResult({ semantic_text: '{"caption_en":"Sunset over the sea"', tags: {} });
+  assert.ok(result, 'a single complete field (no comma/close) must be recovered, not dropped');
+  assert.equal(result?.caption.en, 'Sunset over the sea');
+});
+
+test('truncated JSON recovers a complete array field with no trailing comma', () => {
+  // tags_en fully closed by ], but object never closed and no next comma.
+  const result = buildDrive9SemanticResult({ semantic_text: '{"caption_en":"Cat","tags_en":["cat","sofa"]', tags: {} });
+  assert.ok(result);
+  assert.equal(result?.caption.en, 'Cat');
+  assert.deepEqual(result?.tags.en, ['cat', 'sofa']);
+});
