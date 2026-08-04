@@ -120,6 +120,25 @@ export function buildDrive9SemanticResult(meta: unknown, existingTags: string[] 
   const textEn = textEnFromDrive9Semantic(meta.semantic_text);
   const textZh = textZhFromDrive9Semantic(meta.semantic_text);
 
+  // Only report a Drive9 result when actual Drive9-derived content was
+  // recovered. `existingTags` are the caller's own (user/manual) tags — they are
+  // prepended to tagsEn but must NOT by themselves count as "Drive9 analyzed
+  // this image". If a truncated tail left nothing complete to extract, every
+  // Drive9-derived field is empty; returning a hollow `status:'drive9'` here
+  // would show the image as analysed-but-blank instead of "analysis
+  // unavailable". Return null so the caller renders the explicit unavailable
+  // state rather than a fake-ready one.
+  const existingTagSet = new Set(existingTags.map((t) => cleanDisplayTag(t)).filter(Boolean));
+  const hasDrive9Tags =
+    tagsZh.length > 0 || tagsEn.some((t) => !existingTagSet.has(t));
+  const hasContent =
+    captionEn !== '' ||
+    captionZh !== '' ||
+    textEn !== '' ||
+    textZh !== '' ||
+    hasDrive9Tags;
+  if (!hasContent) return null;
+
   return {
     caption: { zh: captionZh, en: captionEn },
     text: { zh: textZh, en: textEn },
@@ -344,10 +363,87 @@ function semanticObjectFromValue(value: unknown): Record<string, unknown> | null
 
   try {
     const parsed = JSON.parse(candidate);
-    return isRecord(parsed) ? parsed : null;
+    if (isRecord(parsed)) return parsed;
   } catch {
-    return null;
+    // Fall through to truncation recovery: Drive9's semantic_text is produced
+    // by an LLM and can be cut off mid-object (the tail is incomplete), which
+    // must NOT discard the fields that DID arrive complete.
   }
+
+  const repaired = repairTruncatedJsonObject(candidate);
+  if (repaired) {
+    try {
+      const parsed = JSON.parse(repaired);
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // give up on the object path; text-based extraction still applies upstream
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort recovery of a JSON object whose tail was truncated (a very common
+ * LLM output failure). It keeps only the top-level key/value pairs that are
+ * *complete* — a partially-emitted final value is dropped, never guessed — and
+ * closes the object so `JSON.parse` accepts it. Returns null if not even one
+ * complete pair can be recovered.
+ *
+ * The scanner walks the string tracking string/escape and nesting depth so it
+ * can find the last position where the object was at depth 1 (inside the root
+ * object, between complete pairs) and outside a string. Everything after a
+ * trailing comma at that point is discarded, then the object is closed.
+ */
+function repairTruncatedJsonObject(raw: string): string | null {
+  const text = raw.trim();
+  if (!text.startsWith('{')) return null;
+
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  // Index (exclusive) of the end of the last COMPLETE top-level pair — i.e. the
+  // position right after a value that closed back to depth 1 outside a string,
+  // or right after the `{` when nothing complete yet.
+  let lastSafeEnd = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{' || ch === '[') {
+      depth++;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 1) lastSafeEnd = i + 1; // a nested value just closed
+      if (depth === 0) return text.slice(0, i + 1); // whole object is actually intact
+      continue;
+    }
+    if (ch === ',' && depth === 1) {
+      lastSafeEnd = i; // boundary between complete top-level pairs (before the comma)
+      continue;
+    }
+  }
+
+  // We ran off the end while still inside the object (truncated). Cut back to the
+  // last complete pair boundary and close the object.
+  if (lastSafeEnd < 0) return null;
+  const head = text.slice(0, lastSafeEnd).replace(/,\s*$/, '');
+  const closed = `${head}}`;
+  // Sanity: only return something that could plausibly parse (has at least one
+  // "key": value pair).
+  return /"[^"]+"\s*:/.test(closed) ? closed : null;
 }
 
 function jsonObjectCandidate(raw: string): string {
@@ -366,8 +462,13 @@ function jsonObjectCandidate(raw: string): string {
   if (text.startsWith('{') && text.endsWith('}')) return text;
 
   const start = text.indexOf('{');
+  if (start < 0) return '';
   const end = text.lastIndexOf('}');
-  return start >= 0 && end > start ? text.slice(start, end + 1) : '';
+  if (end > start) return text.slice(start, end + 1);
+  // Truncated: an object starts but was never closed. Return from the opening
+  // brace to the end so the caller's truncation-recovery can salvage the
+  // complete leading fields instead of dropping the whole result.
+  return text.slice(start);
 }
 
 function semanticLineValue(text: string, labels: string[]): string {

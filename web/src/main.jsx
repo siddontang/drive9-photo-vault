@@ -355,6 +355,9 @@ function App() {
               : vid ? <div className="pending">{t.pendingVideo}</div>
               : <div className="pending">{t.pending}</div>
             )}
+            {p.analysisStatus === 'unavailable' && (
+              <div className="pending timeout">{t.analysisUnavailable}</div>
+            )}
             {caption && p.analysisStatus !== 'pending' && <div className="summaryBox"><div className="summaryHead"><b>{t.summary}</b><button onClick={() => setExpandedSummary({ ...expandedSummary, [p.id]: !expandedSummary[p.id] })}>{expandedSummary[p.id] ? t.showLess : t.showMore}</button></div><div className={expandedSummary[p.id] ? 'summaryText expanded' : 'summaryText'}>{caption}</div></div>}
             <TagEditor
               photo={p}
