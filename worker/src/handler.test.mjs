@@ -170,13 +170,13 @@ test('POST /api/photos resolves MIME via extension for text/plain (Drive9 parity
   assert.equal(body.photo.mediaKind, 'video');
 });
 
-test('POST /api/photos rejects video exceeding 25MB with 413 and writes nothing', async () => {
+test('POST /api/photos rejects video exceeding the 100MB limit with 413 and writes nothing', async () => {
   resetState();
   const storeKeysBefore = [...drive9Store.keys()];
-  const oversize = new Uint8Array(25 * 1024 * 1024 + 1);
+  const oversize = new Uint8Array(100 * 1024 * 1024 + 1);
   const { status, body } = await uploadFile('big.mp4', 'video/mp4', oversize);
   assert.equal(status, 413);
-  assert.ok(body.error.includes('25'));
+  assert.ok(body.error.includes('100'));
   // No Drive9 object, meta, or index writes should have occurred
   const storeKeysAfter = [...drive9Store.keys()];
   assert.deepEqual(storeKeysAfter, storeKeysBefore, 'no Drive9 writes should happen for oversized upload');

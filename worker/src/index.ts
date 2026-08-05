@@ -69,8 +69,8 @@ const ALLOWED_VIDEO_MIME = new Set([
   'video/x-msvideo',
   'video/x-matroska',
 ]);
-const VIDEO_SIZE_LIMIT = 25 * 1024 * 1024;
-const IMAGE_SIZE_LIMIT = 25 * 1024 * 1024;
+const VIDEO_SIZE_LIMIT = 100 * 1024 * 1024;
+const IMAGE_SIZE_LIMIT = 100 * 1024 * 1024;
 
 const VIDEO_EXT_MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
