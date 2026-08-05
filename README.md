@@ -72,6 +72,7 @@ Endpoints:
 - `GET /api/photos/:id/file`
 - `GET /api/shares/:token`
 - `GET /api/shares/:token/file`
+- `GET /api/shares/:token/poster`
 - `GET /api/collections`
 - `GET /openapi.json`
 
@@ -126,7 +127,9 @@ Workflow file:
 - This is a demo, not a full multi-user auth product yet.
 - Current ownership is a lightweight browser-local `guest-*` id.
 - The gallery remains a public demo rather than a complete account/auth product. Share links use unguessable tokens, expose only one media item, and can be revoked; they are not a replacement for future authenticated library access.
-- Shared media currently streams the original uploaded bytes. The share page has no original-download action, but embedded EXIF/GPS/device metadata is not stripped; a privacy-preserving display rendition is future work.
+- Public share links never stream the original upload. Creating a share first produces a bounded JPEG or H.264/MP4 display rendition; Cloudflare Image Transformations uses `metadata=none`, Media Transformations re-encodes videos, and the social poster is a freshly encoded JPEG. If a privacy-safe rendition cannot be produced, sharing fails closed.
+- Cloudflare Media Transformations currently limits transformed video output to 60 seconds. Longer or unsupported videos remain private and share creation returns an error instead of falling back to the original upload.
+- X and Facebook use their official web share intents. WeChat QR codes are generated in the browser and the token-bearing URL is never sent to a third-party QR service.
 - **Upload limits**: videos support exactly 40,000,000 bytes (40 MB); images remain limited to 25 MiB. The web app streams the raw file body and the Worker forwards sequential Drive9 multipart chunks, so it never retains a whole video in memory. Legacy `multipart/form-data` uploads remain limited to 25 MiB because parsing them buffers the request.
 - **Video playback**: the Worker proxies the file from drive9. HTTP Range requests are forwarded when drive9 supports them; otherwise the full file is downloaded. For short demo clips this is acceptable.
 - **Video analysis**: drive9 video visual extraction takes longer than image analysis. A video may show "analyzing…" for up to several minutes; if analysis has not completed after 10 minutes the UI marks it as timed out.

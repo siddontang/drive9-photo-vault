@@ -45,6 +45,22 @@ let multipartCompleteCount = 0;
 let maxMultipartPartBytes = 0;
 let failMultipartPartNumber = null;
 let failDrive9PutPath = null;
+let failDrive9GetPath = null;
+let failImageTransform = false;
+let failMediaTransform = false;
+let failMediaTransformMode = null;
+let imageTransformCalls = [];
+let mediaTransformCalls = [];
+const SAFE_IMAGE_RENDITION = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]);
+const SAFE_VIDEO_RENDITION = new TextEncoder().encode('privacy-safe-video');
+const SAFE_VIDEO_POSTER = new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0xff, 0xd9]);
+let imageRenditionBytes = SAFE_IMAGE_RENDITION;
+let videoRenditionBytes = SAFE_VIDEO_RENDITION;
+let videoPosterBytes = SAFE_VIDEO_POSTER;
+
+function containsBytes(bytes, needle) {
+  return Buffer.from(bytes).includes(Buffer.from(needle));
+}
 
 async function bodyBytes(body) {
   if (body instanceof Uint8Array) return body;
@@ -61,6 +77,17 @@ globalThis.fetch = async (url, opts = {}) => {
   // Extract the path portion after /v1/fs
   const fsMatch = u.match(/\/v1\/fs(\/.*?)(?:\?.*)?$/);
   const fsPath = fsMatch ? fsMatch[1] : null;
+
+  if (method === 'GET' && fsPath && opts.cf?.image) {
+    imageTransformCalls.push(structuredClone(opts.cf.image));
+    if (failImageTransform) return new Response('transform failed', { status: 415 });
+    if (!drive9Store.has(fsPath)) return new Response('not found', { status: 404 });
+    return new Response(imageRenditionBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+  }
+
+  if (method === 'GET' && fsPath && fsPath === failDrive9GetPath) {
+    return new Response('sensitive upstream detail', { status: 503 });
+  }
 
   if (method === 'POST' && parsedURL.pathname === '/v2/uploads/initiate') {
     const request = JSON.parse(String(opts.body));
@@ -127,6 +154,7 @@ globalThis.fetch = async (url, opts = {}) => {
     if (body instanceof ArrayBuffer) stored = new Uint8Array(body);
     else if (body instanceof Uint8Array) stored = body;
     else if (typeof body === 'string') stored = body;
+    else if (body instanceof ReadableStream) stored = new Uint8Array(await new Response(body).arrayBuffer());
     else if (body && typeof body.arrayBuffer === 'function') stored = new Uint8Array(await body.arrayBuffer());
     else stored = body;
     drive9Store.set(fsPath, stored);
@@ -201,7 +229,38 @@ globalThis.fetch = async (url, opts = {}) => {
 const worker = await import('../dist/index.js');
 const handler = worker.default.fetch || worker.default.default?.fetch;
 
-const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999' };
+function mediaResult(stream, output) {
+  return {
+    async response() {
+      await new Response(stream).arrayBuffer();
+      if (failMediaTransform || failMediaTransformMode === output.mode) return new Response('transform failed', { status: 415 });
+      const body = output.mode === 'frame' ? videoPosterBytes : videoRenditionBytes;
+      const type = output.mode === 'frame' ? 'image/jpeg' : 'video/mp4';
+      return new Response(body, { status: 200, headers: { 'content-type': type } });
+    },
+  };
+}
+
+const mediaBinding = {
+  input(stream) {
+    return {
+      transform(transform) {
+        return {
+          output(output) {
+            mediaTransformCalls.push({ transform: structuredClone(transform), output: structuredClone(output) });
+            return mediaResult(stream, output);
+          },
+        };
+      },
+      output(output) {
+        mediaTransformCalls.push({ transform: null, output: structuredClone(output) });
+        return mediaResult(stream, output);
+      },
+    };
+  },
+};
+
+const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999', MEDIA: mediaBinding };
 
 function resetState() {
   drive9Store.clear();
@@ -216,6 +275,15 @@ function resetState() {
   maxMultipartPartBytes = 0;
   failMultipartPartNumber = null;
   failDrive9PutPath = null;
+  failDrive9GetPath = null;
+  failImageTransform = false;
+  failMediaTransform = false;
+  failMediaTransformMode = null;
+  imageTransformCalls = [];
+  mediaTransformCalls = [];
+  imageRenditionBytes = SAFE_IMAGE_RENDITION;
+  videoRenditionBytes = SAFE_VIDEO_RENDITION;
+  videoPosterBytes = SAFE_VIDEO_POSTER;
 }
 
 // The objectKey a POST /api/photos upload maps to on Drive9. The worker stores
@@ -636,7 +704,13 @@ test('GET /api/photos rejects an invalid Drive9 search response', async () => {
 
 test('POST /api/photos/:id/share creates an unguessable share without leaking internal fields', async () => {
   resetState();
-  const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+  const bytes = new Uint8Array([
+    0xff, 0xd8,
+    ...new TextEncoder().encode('Exif\0\0GPSLatitude=31.2304;GPSLongitude=121.4737;http://ns.adobe.com/xap/1.0/'),
+    0xff, 0xd9,
+  ]);
+  assert.equal(containsBytes(bytes, 'GPSLatitude'), true);
+  assert.equal(containsBytes(bytes, 'http://ns.adobe.com/xap/1.0/'), true);
   const { body: { photo } } = await uploadFile('shared.jpg', 'image/jpeg', bytes);
 
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
@@ -652,6 +726,7 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   const listed = (await list.json()).photos.find((candidate) => candidate.id === photo.id);
   assert.equal(listed.shared, true);
   assert.equal('shareToken' in listed, false, 'management responses must not expose the token');
+  assert.equal('shareRenditionVersion' in listed, false, 'management responses must not expose internal rendition state');
 
   const metadata = await handler(new Request(created.share.url), env);
   assert.equal(metadata.status, 200);
@@ -659,20 +734,173 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   const shared = (await metadata.json()).photo;
   assert.equal(shared.title, 'shared');
   assert.equal(shared.url, `http://localhost/api/shares/${created.share.token}/file`);
-  for (const internalField of ['id', 'owner', 'objectKey', 'checksum', 'shareToken', 'favorite', 'archived', 'note', 'album', 'createdAt', 'analysisStatus']) {
+  for (const internalField of ['id', 'owner', 'objectKey', 'checksum', 'shareToken', 'shareRenditionVersion', 'favorite', 'archived', 'note', 'album', 'createdAt', 'analysisStatus']) {
     assert.equal(internalField in shared, false, `shared metadata must not expose ${internalField}`);
   }
 
   const file = await handler(new Request(shared.url), env);
   assert.equal(file.status, 200);
-  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), bytes);
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), SAFE_IMAGE_RENDITION);
   assert.equal(file.headers.get('cache-control'), 'private, no-store');
+  assert.equal(file.headers.get('content-type'), 'image/jpeg');
+
+  const poster = await handler(new Request(`http://localhost/api/shares/${created.share.token}/poster`), env);
+  assert.equal(poster.status, 200);
+  assert.deepEqual(new Uint8Array(await poster.arrayBuffer()), SAFE_IMAGE_RENDITION);
+  assert.equal(poster.headers.get('cache-control'), 'private, no-store');
 
   const range = await handler(new Request(shared.url, { headers: { range: 'bytes=1-3' } }), env);
   assert.equal(range.status, 206);
-  assert.equal(range.headers.get('content-range'), 'bytes 1-3/5');
+  assert.equal(range.headers.get('content-range'), `bytes 1-3/${SAFE_IMAGE_RENDITION.byteLength}`);
   assert.equal(range.headers.get('cache-control'), 'private, no-store');
-  assert.deepEqual(new Uint8Array(await range.arrayBuffer()), bytes.slice(1, 4));
+  assert.deepEqual(new Uint8Array(await range.arrayBuffer()), SAFE_IMAGE_RENDITION.slice(1, 4));
+
+  assert.deepEqual(imageTransformCalls, [{
+    width: 2000,
+    height: 2000,
+    fit: 'scale-down',
+    format: 'jpeg',
+    quality: 86,
+    metadata: 'none',
+    anim: false,
+  }]);
+  assert.notDeepEqual(SAFE_IMAGE_RENDITION, bytes, 'the public endpoint must never return original upload bytes');
+  assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'GPSLatitude'), false);
+  assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'http://ns.adobe.com/xap/1.0/'), false);
+});
+
+test('POST /api/photos/:id/share creates metadata-stripped video and poster renditions', async () => {
+  resetState();
+  const source = new Uint8Array([
+    ...new TextEncoder().encode('ftypqt  com.apple.quicktime.location.ISO6709=+31.2304+121.4737/'),
+    0xa9, 0x78, 0x79, 0x7a,
+  ]);
+  assert.equal(containsBytes(source, 'com.apple.quicktime.location.ISO6709'), true);
+  assert.equal(containsBytes(source, new Uint8Array([0xa9, 0x78, 0x79, 0x7a])), true);
+  const { body: { photo } } = await uploadFile('clip.mp4', 'video/mp4', source);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+
+  const file = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(file.status, 200);
+  assert.equal(file.headers.get('content-type'), 'video/mp4');
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), SAFE_VIDEO_RENDITION);
+
+  const poster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(poster.status, 200);
+  assert.equal(poster.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(new Uint8Array(await poster.arrayBuffer()), SAFE_VIDEO_POSTER);
+  assert.equal(containsBytes(SAFE_VIDEO_RENDITION, 'com.apple.quicktime.location.ISO6709'), false);
+  assert.equal(containsBytes(SAFE_VIDEO_POSTER, 'com.apple.quicktime.location.ISO6709'), false);
+  assert.deepEqual(mediaTransformCalls, [
+    {
+      transform: { width: 1920, height: 1080, fit: 'scale-down' },
+      output: { mode: 'video', audio: true },
+    },
+    {
+      transform: { width: 1600, height: 1200, fit: 'scale-down' },
+      output: { mode: 'frame', time: '0s', format: 'jpg' },
+    },
+  ]);
+});
+
+test('share creation fails closed when a privacy-safe rendition cannot be produced', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.jpg', 'image/jpeg', new Uint8Array([9, 8, 7]));
+  failImageTransform = true;
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 502);
+  assert.deepEqual(await create.json(), {
+    error: 'could not prepare a privacy-safe share rendition',
+    storage: 'drive9',
+  });
+
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareToken, undefined);
+  assert.equal(stored.shareRenditionVersion, undefined);
+  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
+});
+
+test('share creation fails closed if transformed image bytes still contain EXIF or XMP', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.jpg', 'image/jpeg', new Uint8Array([9, 8, 7]));
+  imageRenditionBytes = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('safe-prefix http://ns.adobe.com/xap/'));
+      controller.enqueue(new TextEncoder().encode('1.0/ private-tail'));
+      controller.close();
+    },
+  });
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 502);
+  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareToken, undefined);
+});
+
+test('share creation fails closed if transformed video retains QuickTime location metadata', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.mp4', 'video/mp4', new Uint8Array([9, 8, 7]));
+  videoRenditionBytes = new Uint8Array([
+    ...new TextEncoder().encode('safe-prefix'),
+    0xa9, 0x78, 0x79, 0x7a,
+    ...new TextEncoder().encode('+31.2304+121.4737/'),
+  ]);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 502);
+  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareToken, undefined);
+});
+
+test('video share creation removes the completed video when poster transformation fails', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.mp4', 'video/mp4', new Uint8Array([9, 8, 7]));
+  failMediaTransformMode = 'frame';
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 502);
+  assert.equal([...drive9Store.keys()].some((path) => path.includes(photo.id) && path.includes('/share-renditions/')), false);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareToken, undefined);
+  assert.equal(stored.shareRenditionVersion, undefined);
+});
+
+test('an existing share lazily migrates to the privacy-safe rendition', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('legacy.jpg', 'image/jpeg', new Uint8Array([7, 6, 5]));
+  const token = 'L'.repeat(32);
+  updatePhotoMeta(photo, { shareToken: token, sharedAt: new Date().toISOString() });
+
+  const metadata = await handler(new Request(`http://localhost/api/shares/${token}`), env);
+  assert.equal(metadata.status, 200);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareRenditionVersion, 1);
+  const file = await handler(new Request(`http://localhost/api/shares/${token}/file`), env);
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), SAFE_IMAGE_RENDITION);
+});
+
+test('public share failures never expose upstream storage details', async () => {
+  resetState();
+  failDrive9GetPath = '/photovault/index.json.gz';
+  const originalWarn = console.warn;
+  console.warn = () => {};
+
+  try {
+    const response = await handler(new Request(`http://localhost/api/shares/${'S'.repeat(32)}`), env);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: 'share temporarily unavailable',
+      storage: 'drive9',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test('GET /api/shares/:token returns the same 404 for invalid, unshared, and revoked links', async () => {
@@ -692,7 +920,7 @@ test('GET /api/shares/:token returns the same 404 for invalid, unshared, and rev
   const revoke = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'DELETE' }), env);
   assert.equal(revoke.status, 204);
 
-  for (const suffix of ['', '/file']) {
+  for (const suffix of ['', '/file', '/poster']) {
     const response = await handler(new Request(`http://localhost/api/shares/${token}${suffix}`), env);
     assert.equal(response.status, 404);
     assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -711,7 +939,12 @@ test('archiving or deleting a photo invalidates its share link', async () => {
     body: JSON.stringify({ archived: true }),
   }), env);
   assert.equal(archive.status, 200);
-  assert.equal((await handler(new Request(`http://localhost/api/shares/${firstToken}`), env)).status, 404);
+  for (const suffix of ['', '/file', '/poster']) {
+    const response = await handler(new Request(`http://localhost/api/shares/${firstToken}${suffix}`), env);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  assert.equal([...drive9Store.keys()].some((path) => path.includes(first.body.photo.id) && path.includes('/share-renditions/')), false);
   await handler(new Request(`http://localhost/api/photos/${first.body.photo.id}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -724,7 +957,12 @@ test('archiving or deleting a photo invalidates its share link', async () => {
   const secondToken = (await secondShare.json()).share.token;
   const remove = await handler(new Request(`http://localhost/api/photos/${second.body.photo.id}`, { method: 'DELETE' }), env);
   assert.equal(remove.status, 204);
-  assert.equal((await handler(new Request(`http://localhost/api/shares/${secondToken}`), env)).status, 404);
+  for (const suffix of ['', '/file', '/poster']) {
+    const response = await handler(new Request(`http://localhost/api/shares/${secondToken}${suffix}`), env);
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+  assert.equal([...drive9Store.keys()].some((path) => path.includes(second.body.photo.id) && path.includes('/share-renditions/')), false);
 });
 
 // -- File proxy / Range --

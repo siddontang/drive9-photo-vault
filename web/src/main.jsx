@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { Check, Copy, Globe2, Heart, Link2Off, LoaderCircle, Play, Plus, Search, Share2, Trash2, Upload, X } from 'lucide-react';
+import { Check, Globe2, Heart, Link2Off, LoaderCircle, Play, Plus, Search, Share2, Trash2, Upload, X } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
+import ShareActions from './ShareActions.jsx';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
 import { isSharePath, sharePageUrl, shareTokenFromPath } from './shareLink.js';
@@ -97,8 +98,8 @@ function TagEditor({ photo, tags, addDraft, removing, t, onFilter, onAddDraft, o
   </div>;
 }
 
-function LangSwitch({ lang, setLang, t }) {
-  const [showCoach, setShowCoach] = useState(() => !localStorage.photoVaultLangSeen);
+function LangSwitch({ lang, setLang, t, coach = true }) {
+  const [showCoach, setShowCoach] = useState(() => coach && !localStorage.photoVaultLangSeen);
   const dismissedRef = useRef(false);
   const dismiss = () => {
     if (dismissedRef.current) return;
@@ -161,13 +162,15 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
           <span>{t.manualCopyHelp}</span>
           <input value={link} readOnly onFocus={(event) => event.target.select()} />
         </label>}
-        <div className="shareButtons">
-          {canNativeShare && <button className="nativeShareButton" type="button" disabled={busy} onClick={onNativeShare}><Share2 size={19} /> {t.shareNow}</button>}
-          <button className={`${copied ? 'copyShareButton copied' : 'copyShareButton'}${canNativeShare ? '' : ' primary'}`} type="button" disabled={busy} onClick={onCopy}>
-            {busy ? <LoaderCircle className="spin" size={19} /> : copied ? <Check size={19} /> : <Copy size={19} />}
-            {copied ? t.copied : t.copyShareLink}
-          </button>
-        </div>
+        <ShareActions
+          url={link}
+          title={photo.title}
+          copied={copied}
+          canNativeShare={canNativeShare}
+          t={t}
+          onCopy={onCopy}
+          onNativeShare={onNativeShare}
+        />
         {!confirmRevoke ? (
           <button className="revokeShareButton" type="button" disabled={busy} onClick={onRevoke}><Link2Off size={17} /> {t.revokeLink}</button>
         ) : (
@@ -188,6 +191,7 @@ function SharedPhotoPage({ token }) {
   const { lang, setLang, t } = useLang();
   const [photo, setPhoto] = useState(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let robots = document.querySelector('meta[name="robots"]');
@@ -220,32 +224,64 @@ function SharedPhotoPage({ token }) {
     return () => controller.abort();
   }, [token]);
 
+  useEffect(() => {
+    if (!copied) return;
+    const timeout = setTimeout(() => setCopied(false), 1800);
+    return () => clearTimeout(timeout);
+  }, [copied]);
+
   const caption = photo ? pickLangField(photo, lang, 'aiCaption') : '';
   const tags = photo ? pickLangTags(photo, lang) : [];
   const video = photo && isVideo(photo);
+  const link = sharePageUrl(window.location.origin, token);
+  const mediaUrl = apiUrl(`/api/shares/${token}/file`);
+  const copyLink = async () => {
+    if (await copyText(link)) setCopied(true);
+  };
+  const nativeShare = async () => {
+    if (!photo || typeof navigator.share !== 'function') return;
+    try { await navigator.share({ title: photo.title, url: link }); } catch (reason) {
+      if (reason?.name !== 'AbortError') await copyLink();
+    }
+  };
 
   return <main className="sharedPage">
     <header className="sharedChrome">
       <div className="sharedWordmark"><span>PhotoVault</span><small>{t.sharedPhoto}</small></div>
-      <LangSwitch lang={lang} setLang={setLang} t={t} />
+      <LangSwitch lang={lang} setLang={setLang} t={t} coach={false} />
     </header>
     <section className="sharedStage" aria-live="polite">
       {unavailable && <div className="sharedUnavailable">{t.shareUnavailable}</div>}
       {!unavailable && !photo && <div className="sharedUnavailable"><LoaderCircle className="spin" size={22} /><span>{t.loadingShare}</span></div>}
       {photo && <>
-        <div className="sharedMediaFrame">
-          {video ? (
-            <video src={apiUrl(`/api/shares/${token}/file`)} controls playsInline preload="metadata" />
-          ) : (
-            <img src={apiUrl(`/api/shares/${token}/file`)} alt={photo.title} />
-          )}
+        <div className="sharedMediaScene">
+          {!video && <img className="sharedBackdrop" src={mediaUrl} alt="" aria-hidden="true" />}
+          <div className="sharedMediaFrame">
+            {video ? (
+              <video src={mediaUrl} controls playsInline preload="metadata" />
+            ) : (
+              <img src={mediaUrl} alt={photo.title} />
+            )}
+          </div>
+          <article className="sharedInfo">
+            <div className="sharedCopy">
+              <h2>{photo.title}</h2>
+              <div className="sub">{fmtBytes(photo.size)}</div>
+              {caption && <p className="sharedCaption">{caption}</p>}
+              {!!tags.length && <div className="sharedTags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+            </div>
+            <ShareActions
+              url={link}
+              title={photo.title}
+              copied={copied}
+              canNativeShare={typeof navigator.share === 'function'}
+              t={t}
+              onCopy={copyLink}
+              onNativeShare={nativeShare}
+              compact
+            />
+          </article>
         </div>
-        <article className="sharedInfo">
-        <h2>{photo.title}</h2>
-        <div className="sub">{fmtBytes(photo.size)}</div>
-        {caption && <p className="sharedCaption">{caption}</p>}
-        {!!tags.length && <div className="sharedTags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
-        </article>
       </>}
     </section>
     <footer className="footer">{t.poweredBy} <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
@@ -569,18 +605,21 @@ function App() {
               />
             )}
           </button>
-          <button
-            className={p.shared ? 'mediaShareButton active' : 'mediaShareButton'}
-            type="button"
-            disabled={shareBusyId === p.id}
-            onClick={() => sharePhoto(p)}
-            aria-label={p.shared ? t.manageShare : t.share}
-            title={p.shared ? t.manageShare : t.share}
-          >
-            {shareBusyId === p.id ? <LoaderCircle className="spin" size={18} /> : <Share2 size={18} />}
-          </button>
           <div className="photoInfo">
-            <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
+            <div className="title"><b>{p.title}</b><span className="cardActions">
+              <button
+                className={p.shared ? 'icon cardShareAction shared' : 'icon cardShareAction'}
+                type="button"
+                disabled={shareBusyId === p.id}
+                onClick={() => sharePhoto(p)}
+                aria-label={p.shared ? t.manageShare : t.share}
+                aria-pressed={p.shared}
+                title={p.shared ? t.manageShare : t.share}
+              >
+                {shareBusyId === p.id ? <LoaderCircle className="spin" size={16} /> : <Share2 size={16} />}
+              </button>
+              <button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button>
+            </span></div>
             <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
             {p.analysisStatus === 'pending' && (
               isPendingTimedOut(p) ? <div className="pending timeout">{t.pendingTimeout}</div>
