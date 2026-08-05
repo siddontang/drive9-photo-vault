@@ -6,28 +6,8 @@ export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
   IMAGES?: ImagesBinding;
-  MEDIA?: MediaTransformBinding;
+  MEDIA?: MediaBinding;
 }
-
-type ImageTransformResult = { response(): Response | Promise<Response> };
-type ImageTransformOutput = {
-  output(options: { format: 'image/jpeg'; quality: number; anim: false }): ImageTransformResult;
-};
-type ImagesBinding = {
-  input(stream: ReadableStream<Uint8Array>): {
-    transform(options: { width: number; height: number; fit: 'scale-down'; metadata: 'none' }): ImageTransformOutput;
-  };
-};
-
-type MediaTransformResult = { response(): Promise<Response> };
-type MediaTransformOutput = {
-  output(options: { mode: 'video' | 'frame'; time?: string; format?: 'jpg'; audio?: boolean }): MediaTransformResult;
-};
-type MediaTransformBinding = {
-  input(stream: ReadableStream<Uint8Array>): MediaTransformOutput & {
-    transform(options: { width: number; height: number; fit: 'scale-down' }): MediaTransformOutput;
-  };
-};
 
 type MediaKind = 'image' | 'video';
 
@@ -531,14 +511,21 @@ async function createImageShareRendition(env: Env, photo: Photo) {
   const source = await drive9PhotoResponse(env, photo);
   let response: Response;
   try {
-    response = await env.IMAGES.input(source.body!)
-      .transform({ width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' })
-      .output({ format: 'image/jpeg', quality: 86, anim: false })
-      .response();
+    const metadataFreeResult = await env.IMAGES.input(source.body!)
+      .transform({ width: 2000, height: 2000, fit: 'scale-down' })
+      .output({ format: 'image/webp', quality: 86, anim: false });
+    const metadataFreeResponse = metadataFreeResult.response();
+    if (!metadataFreeResponse.ok || !metadataFreeResponse.body) {
+      throw new Error(`metadata stripping failed (${metadataFreeResponse.status})`);
+    }
+
+    const jpegResult = await env.IMAGES.input(metadataFreeResponse.body)
+      .output({ format: 'image/jpeg', quality: 86, anim: false });
+    response = jpegResult.response();
   } catch {
     throw new ShareRenditionError('image_transform', 'image transformation failed');
   }
-  if (!response.ok) throw new ShareRenditionError('image_transform', `image transformation failed (${response.status})`);
+  if (!response.ok || !response.body) throw new ShareRenditionError('image_transform', `image transformation failed (${response.status})`);
   await writeShareRendition(env, shareDisplayPath(photo), 'image/jpeg', response.body);
 }
 

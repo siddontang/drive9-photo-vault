@@ -53,6 +53,7 @@ let imageTransformCalls = [];
 let imageSourceFetches = [];
 let mediaTransformCalls = [];
 const SAFE_IMAGE_RENDITION = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]);
+const SAFE_WEBP_RENDITION = new TextEncoder().encode('RIFF-safe-WEBP');
 const SAFE_VIDEO_RENDITION = new TextEncoder().encode('privacy-safe-video');
 const SAFE_VIDEO_POSTER = new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0xff, 0xd9]);
 let imageRenditionBytes = null;
@@ -233,28 +234,42 @@ const handler = worker.default.fetch || worker.default.default?.fetch;
 
 const imagesBinding = {
   input(stream) {
+    const transforms = [];
     return {
       transform(transform) {
+        const allowed = new Set(['width', 'height', 'background', 'blur', 'border', 'brightness', 'contrast', 'fit', 'flip', 'gamma', 'segment', 'gravity', 'rotate', 'saturation', 'sharpen', 'trim']);
+        const unsupported = Object.keys(transform).filter((key) => !allowed.has(key));
+        if (unsupported.length) throw new Error(`unsupported Images binding transform option: ${unsupported.join(', ')}`);
+        transforms.push(structuredClone(transform));
+        return this;
+      },
+      async output(output) {
+        const source = new Uint8Array(await new Response(stream).arrayBuffer());
+        imageTransformCalls.push({
+          transforms: structuredClone(transforms),
+          output: structuredClone(output),
+          source,
+        });
         return {
-          output(output) {
-            imageTransformCalls.push({
-              transform: structuredClone(transform),
-              output: structuredClone(output),
-            });
-            return {
-              async response() {
-                const source = new Uint8Array(await new Response(stream).arrayBuffer());
-                if (failImageTransform) return new Response('transform failed', { status: 415 });
-                const body = imageRenditionBytes ?? (transform.metadata === 'none' ? SAFE_IMAGE_RENDITION : source);
-                return new Response(body, { status: 200, headers: { 'content-type': 'image/jpeg' } });
-              },
-            };
+          response() {
+            if (failImageTransform) return new Response('transform failed', { status: 415 });
+            const body = output.format === 'image/webp'
+              ? SAFE_WEBP_RENDITION
+              : (imageRenditionBytes ?? (Buffer.from(source).equals(Buffer.from(SAFE_WEBP_RENDITION)) ? SAFE_IMAGE_RENDITION : source));
+            return new Response(body, { status: 200, headers: { 'content-type': output.format } });
           },
         };
       },
     };
   },
 };
+
+test('Images binding mock rejects the unsupported metadata transform option', () => {
+  assert.throws(
+    () => imagesBinding.input(new Blob(['image']).stream()).transform({ width: 2000, metadata: 'none' }),
+    /unsupported Images binding transform option: metadata/,
+  );
+});
 
 function mediaResult(stream, output) {
   return {
@@ -788,16 +803,23 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
     authorization: 'Bearer test-key',
     usedCfImage: false,
   }], 'private Drive9 bytes must be fetched with auth before entering the Images binding');
-  assert.deepEqual(imageTransformCalls, [{
-    transform: { width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' },
+  assert.equal(imageTransformCalls.length, 2);
+  assert.deepEqual(imageTransformCalls[0], {
+    transforms: [{ width: 2000, height: 2000, fit: 'scale-down' }],
+    output: { format: 'image/webp', quality: 86, anim: false },
+    source: bytes,
+  });
+  assert.deepEqual(imageTransformCalls[1], {
+    transforms: [],
     output: { format: 'image/jpeg', quality: 86, anim: false },
-  }]);
+    source: SAFE_WEBP_RENDITION,
+  });
   assert.notDeepEqual(SAFE_IMAGE_RENDITION, bytes, 'the public endpoint must never return original upload bytes');
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'GPSLatitude'), false);
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'http://ns.adobe.com/xap/1.0/'), false);
 });
 
-test('image sharing explicitly strips non-location EXIF copyright metadata', async () => {
+test('image sharing strips non-location EXIF copyright metadata through a metadata-free intermediate', async () => {
   resetState();
   const source = new Uint8Array([
     0xff, 0xd8,
@@ -813,7 +835,10 @@ test('image sharing explicitly strips non-location EXIF copyright metadata', asy
   assert.deepEqual(stored, SAFE_IMAGE_RENDITION);
   assert.equal(containsBytes(stored, 'Exif\0\0'), false);
   assert.equal(containsBytes(stored, 'Copyright'), false);
-  assert.equal(imageTransformCalls[0].transform.metadata, 'none');
+  assert.equal(imageTransformCalls.length, 2);
+  assert.equal(imageTransformCalls[0].output.format, 'image/webp');
+  assert.equal(imageTransformCalls[1].output.format, 'image/jpeg');
+  assert.equal(imageTransformCalls.some((call) => call.transforms.some((transform) => 'metadata' in transform)), false);
 });
 
 test('image sharing reports the Images binding 20 MB input limit before fetching source bytes', async () => {
