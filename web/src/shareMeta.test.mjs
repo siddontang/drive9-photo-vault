@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { injectShareMeta, shareMetaTags, shareToken } from '../netlify/edge-functions/share-meta-core.mjs';
+import { injectShareMeta, shareMetaTags, shareToken } from '../netlify/lib/share-meta-core.mjs';
 import shareMeta from '../netlify/edge-functions/share-meta.mjs';
 
 const token = 'AbCdEf0123456789_-AbCdEf01234567';
