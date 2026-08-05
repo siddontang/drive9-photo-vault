@@ -19,6 +19,7 @@ Upload photos and short videos, let drive9 extract image/video semantics asynchr
 - Show compact photo summaries with `show more / show less`
 - Show folded tag lists with `+N more`
 - Favorite and delete photos
+- Create and revoke unguessable, read-only links for one photo or video
 - Detect duplicate uploads by SHA-256 checksum
 - Display upload/indexing progress
 - Expose a Cloudflare Worker OpenAPI gateway
@@ -66,7 +67,11 @@ Endpoints:
 - `POST /api/photos` multipart upload
 - `PATCH /api/photos/:id`
 - `DELETE /api/photos/:id`
+- `POST /api/photos/:id/share`
+- `DELETE /api/photos/:id/share`
 - `GET /api/photos/:id/file`
+- `GET /api/shares/:token`
+- `GET /api/shares/:token/file`
 - `GET /api/collections`
 - `GET /openapi.json`
 
@@ -120,6 +125,8 @@ Workflow file:
 - The app stores a compact metadata index to avoid making drive9 embed a huge JSON file.
 - This is a demo, not a full multi-user auth product yet.
 - Current ownership is a lightweight browser-local `guest-*` id.
+- The gallery remains a public demo rather than a complete account/auth product. Share links use unguessable tokens, expose only one media item, and can be revoked; they are not a replacement for future authenticated library access.
+- Shared media currently streams the original uploaded bytes. The share page has no original-download action, but embedded EXIF/GPS/device metadata is not stripped; a privacy-preserving display rendition is future work.
 - **Video upload limit**: ≤25 MB per file. Videos are relayed through the Cloudflare Worker (128 MB heap), so large files are not supported in this demo.
 - **Video playback**: the Worker proxies the file from drive9. HTTP Range requests are forwarded when drive9 supports them; otherwise the full file is downloaded. For short demo clips this is acceptable.
 - **Video analysis**: drive9 video visual extraction takes longer than image analysis. A video may show "analyzing…" for up to several minutes; if analysis has not completed after 10 minutes the UI marks it as timed out.

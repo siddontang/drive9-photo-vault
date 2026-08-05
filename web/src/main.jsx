@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { Check, Heart, Play, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { Check, Copy, Globe2, Heart, Link2Off, LoaderCircle, Play, Plus, Search, Share2, Trash2, Upload, X } from 'lucide-react';
 import './style.css';
 import { useLang, pickLangField, pickLangTags, fmtBytes } from './i18n';
 import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
+import { isSharePath, sharePageUrl, shareTokenFromPath } from './shareLink.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
 const apiUrl = (path) => `${API}${path}`;
@@ -40,6 +41,25 @@ function normalizeTags(values) {
     .flatMap((value) => String(value || '').split(','))
     .map((x) => x.trim())
     .filter(Boolean))].slice(0, 24);
+}
+
+async function copyText(value) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {}
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand?.('copy') || false;
+  textarea.remove();
+  return copied;
 }
 
 function TagEditor({ photo, tags, addDraft, removing, t, onFilter, onAddDraft, onAdd, onRemove, onToggleRemove, expanded, onToggleExpanded }) {
@@ -105,6 +125,132 @@ function LangSwitch({ lang, setLang, t }) {
   </div>;
 }
 
+function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canNativeShare, t, onClose, onNativeShare, onCopy, onRevoke, onCancelRevoke }) {
+  const sheetRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const onKeyDown = (event) => { if (event.key === 'Escape') onCloseRef.current(); };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKeyDown);
+    sheetRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  return <div className="shareOverlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section ref={sheetRef} className="shareSheet" role="dialog" aria-modal="true" aria-labelledby="shareSheetTitle" aria-describedby="shareAccessBody" tabIndex={-1}>
+      <div className="shareSheetHandle" />
+      <button className="shareClose" type="button" onClick={onClose} aria-label={t.close}><X size={18} /></button>
+      <div className="sharePreview">
+        {isVideo(photo) ? <video src={photo.url + '#t=0.5'} muted playsInline preload="metadata" /> : <img src={photo.url} alt="" />}
+      </div>
+      <div className="shareSheetBody">
+        <div className="shareSheetEyebrow">{t.share}</div>
+        <h2 id="shareSheetTitle">{photo.title}</h2>
+        <div className="shareAccess">
+          <span className="shareAccessIcon"><Globe2 size={18} /></span>
+          <span><b>{t.shareAccessTitle}</b><small id="shareAccessBody">{t.shareAccessBody}</small></span>
+        </div>
+        {manualCopy && <label className="manualShareCopy">
+          <span>{t.manualCopyHelp}</span>
+          <input value={link} readOnly onFocus={(event) => event.target.select()} />
+        </label>}
+        <div className="shareButtons">
+          {canNativeShare && <button className="nativeShareButton" type="button" disabled={busy} onClick={onNativeShare}><Share2 size={19} /> {t.shareNow}</button>}
+          <button className={`${copied ? 'copyShareButton copied' : 'copyShareButton'}${canNativeShare ? '' : ' primary'}`} type="button" disabled={busy} onClick={onCopy}>
+            {busy ? <LoaderCircle className="spin" size={19} /> : copied ? <Check size={19} /> : <Copy size={19} />}
+            {copied ? t.copied : t.copyShareLink}
+          </button>
+        </div>
+        {!confirmRevoke ? (
+          <button className="revokeShareButton" type="button" disabled={busy} onClick={onRevoke}><Link2Off size={17} /> {t.revokeLink}</button>
+        ) : (
+          <div className="revokeConfirm" role="alert">
+            <div><b>{t.revokeConfirmTitle}</b><span>{t.revokeConfirmBody}</span></div>
+            <div className="revokeConfirmActions">
+              <button type="button" disabled={busy} onClick={onCancelRevoke}>{t.keepSharing}</button>
+              <button className="danger" type="button" disabled={busy} onClick={onRevoke}>{busy ? <LoaderCircle className="spin" size={16} /> : null}{t.revokeConfirm}</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  </div>;
+}
+
+function SharedPhotoPage({ token }) {
+  const { lang, setLang, t } = useLang();
+  const [photo, setPhoto] = useState(null);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    let robots = document.querySelector('meta[name="robots"]');
+    const created = !robots;
+    if (!robots) {
+      robots = document.createElement('meta');
+      robots.name = 'robots';
+      document.head.appendChild(robots);
+    }
+    const previous = robots.content;
+    robots.content = 'noindex, noarchive';
+    return () => {
+      if (created) robots.remove();
+      else robots.content = previous;
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setUnavailable(false);
+    fetch(apiUrl(`/api/shares/${token}`), { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('share unavailable');
+        return response.json();
+      })
+      .then((payload) => setPhoto(payload.photo))
+      .catch((reason) => {
+        if (reason?.name !== 'AbortError') setUnavailable(true);
+      });
+    return () => controller.abort();
+  }, [token]);
+
+  const caption = photo ? pickLangField(photo, lang, 'aiCaption') : '';
+  const tags = photo ? pickLangTags(photo, lang) : [];
+  const video = photo && isVideo(photo);
+
+  return <main className="sharedPage">
+    <header className="sharedChrome">
+      <div className="sharedWordmark"><span>PhotoVault</span><small>{t.sharedPhoto}</small></div>
+      <LangSwitch lang={lang} setLang={setLang} t={t} />
+    </header>
+    <section className="sharedStage" aria-live="polite">
+      {unavailable && <div className="sharedUnavailable">{t.shareUnavailable}</div>}
+      {!unavailable && !photo && <div className="sharedUnavailable"><LoaderCircle className="spin" size={22} /><span>{t.loadingShare}</span></div>}
+      {photo && <>
+        <div className="sharedMediaFrame">
+          {video ? (
+            <video src={apiUrl(`/api/shares/${token}/file`)} controls playsInline preload="metadata" />
+          ) : (
+            <img src={apiUrl(`/api/shares/${token}/file`)} alt={photo.title} />
+          )}
+        </div>
+        <article className="sharedInfo">
+        <h2>{photo.title}</h2>
+        <div className="sub">{fmtBytes(photo.size)}</div>
+        {caption && <p className="sharedCaption">{caption}</p>}
+        {!!tags.length && <div className="sharedTags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+        </article>
+      </>}
+    </section>
+    <footer className="footer">{t.poweredBy} <a href="https://drive9.ai" target="_blank" rel="noreferrer">drive9.ai</a></footer>
+  </main>;
+}
+
 function App() {
   const { lang, setLang, t } = useLang();
   const [photos, setPhotos] = useState([]);
@@ -121,6 +267,12 @@ function App() {
   const [expandedSummary, setExpandedSummary] = useState({});
   const [draft, setDraft] = useState({ tags: '' });
   const [lightboxId, setLightboxId] = useState(null);
+  const [shareBusyId, setShareBusyId] = useState(null);
+  const [shareSheet, setShareSheet] = useState(null);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [manualShareCopy, setManualShareCopy] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [toast, setToast] = useState('');
   const photoLoadGate = useRef(null);
   if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate(q, tag);
   photoLoadGate.current.setSearch(q, tag);
@@ -129,6 +281,16 @@ function App() {
   useEffect(() => {
     if (lightboxId != null && lightboxIndex < 0) setLightboxId(null);
   }, [lightboxId, lightboxIndex]);
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = setTimeout(() => setToast(''), 2400);
+    return () => clearTimeout(timeout);
+  }, [toast]);
+  useEffect(() => {
+    if (!shareCopied) return;
+    const timeout = setTimeout(() => setShareCopied(false), 1800);
+    return () => clearTimeout(timeout);
+  }, [shareCopied]);
 
   async function loadPhotos(signal) {
     const request = photoLoadGate.current.begin();
@@ -271,6 +433,65 @@ function App() {
     await fetch(apiUrl(`/api/photos/${id}`), { method: 'DELETE' });
     await load();
   }
+  async function sharePhoto(photo) {
+    setShareBusyId(photo.id);
+    setError('');
+    try {
+      const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'POST' });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
+      const link = sharePageUrl(window.location.origin, payload.share.token);
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true } : item));
+      setShareCopied(false);
+      setManualShareCopy(false);
+      setConfirmRevoke(false);
+      setShareSheet({ photo: { ...photo, shared: true }, link });
+    } catch (reason) {
+      setError(t.shareFailed(reason?.message || reason));
+    } finally {
+      setShareBusyId(null);
+    }
+  }
+  async function copyShareLink() {
+    if (!shareSheet) return;
+    const copied = await copyText(shareSheet.link);
+    if (!copied) {
+      setManualShareCopy(true);
+      return;
+    }
+    setShareCopied(true);
+    setManualShareCopy(false);
+    setToast(t.shareCopied);
+  }
+  async function nativeShareLink() {
+    if (!shareSheet || typeof navigator.share !== 'function') return;
+    try {
+      await navigator.share({ title: shareSheet.photo.title, url: shareSheet.link });
+      setToast(t.shared);
+    } catch (reason) {
+      if (reason?.name !== 'AbortError') setManualShareCopy(true);
+    }
+  }
+  async function unsharePhoto(photo) {
+    if (!confirmRevoke) {
+      setConfirmRevoke(true);
+      return;
+    }
+    setShareBusyId(photo.id);
+    setError('');
+    try {
+      const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'DELETE' });
+      if (!response.ok) throw new Error(await response.text());
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: false } : item));
+      setShareSheet(null);
+      setConfirmRevoke(false);
+      setToast(t.shareRevoked);
+    } catch (reason) {
+      setError(t.shareFailed(reason?.message || reason));
+    } finally {
+      setShareBusyId(null);
+    }
+  }
 
   const totals = collections?.totals || { photos: 0, favorites: 0, bytes: 0 };
   const tags = collections?.tags || [];
@@ -347,6 +568,16 @@ function App() {
               />
             )}
           </button>
+          <button
+            className={p.shared ? 'mediaShareButton active' : 'mediaShareButton'}
+            type="button"
+            disabled={shareBusyId === p.id}
+            onClick={() => sharePhoto(p)}
+            aria-label={p.shared ? t.manageShare : t.share}
+            title={p.shared ? t.manageShare : t.share}
+          >
+            {shareBusyId === p.id ? <LoaderCircle className="spin" size={18} /> : <Share2 size={18} />}
+          </button>
           <div className="photoInfo">
             <div className="title"><b>{p.title}</b><button className={p.favorite ? 'icon on' : 'icon'} onClick={() => patch(p.id, { favorite: !p.favorite })}><Heart size={17} /></button></div>
             <div className="sub">{p.album} · {fmtBytes(p.size)}</div>
@@ -393,7 +624,26 @@ function App() {
         t={t}
       />
     )}
+    {shareSheet && (
+      <ShareSheet
+        photo={shareSheet.photo}
+        link={shareSheet.link}
+        busy={shareBusyId === shareSheet.photo.id}
+        copied={shareCopied}
+        manualCopy={manualShareCopy}
+        confirmRevoke={confirmRevoke}
+        canNativeShare={typeof navigator.share === 'function'}
+        t={t}
+        onClose={() => { if (!shareBusyId) { setShareSheet(null); setShareCopied(false); setConfirmRevoke(false); setManualShareCopy(false); } }}
+        onNativeShare={nativeShareLink}
+        onCopy={copyShareLink}
+        onRevoke={() => unsharePhoto(shareSheet.photo)}
+        onCancelRevoke={() => setConfirmRevoke(false)}
+      />
+    )}
+    {toast && <div className="shareToast" role="status"><Check size={17} /> {toast}</div>}
   </main>;
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const shareToken = shareTokenFromPath(window.location.pathname);
+createRoot(document.getElementById('root')).render(isSharePath(window.location.pathname) ? <SharedPhotoPage token={shareToken || ''} /> : <App />);

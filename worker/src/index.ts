@@ -33,6 +33,8 @@ type Photo = {
   aiTagsEn?: string[];
   aiTagsZh?: string[];
   analysisStatus?: string;
+  shareToken?: string;
+  sharedAt?: string;
 };
 
 type PhotoIndexItem = {
@@ -102,6 +104,8 @@ const INDEX_PATH = '/photovault/index.json.gz';
 const LEGACY_INDEX_PATH = '/photovault/index.json';
 const ROOT = '/photovault';
 const META_ROOT = `${ROOT}/meta`;
+const SHARE_TOKEN_BYTES = 24;
+const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
@@ -121,6 +125,12 @@ function text(data: string, init: ResponseInit = {}) {
 async function sha256(buf: ArrayBuffer) {
   const digest = await crypto.subtle.digest('SHA-256', buf);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function generateShareToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(SHARE_TOKEN_BYTES));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function drive9Base(env: Env) {
   return (env.DRIVE9_SERVER || 'https://api.drive9.ai').replace(/\/$/, '');
@@ -255,6 +265,32 @@ function compactPhotoMeta(p: Photo): Photo {
     aiTagsZh: tagsZh,
   };
 }
+function photoForManagement(p: Photo, origin: string) {
+  const { shareToken: _shareToken, sharedAt: _sharedAt, ...photo } = p;
+  return {
+    ...photo,
+    shared: !!p.shareToken,
+    url: `${origin}/api/photos/${p.id}/file`,
+  };
+}
+function photoForShare(p: Photo, origin: string, token: string) {
+  return {
+    title: p.title,
+    tags: p.tags,
+    mime: p.mime,
+    size: p.size,
+    mediaKind: inferMediaKind(p),
+    aiCaptionEn: p.aiCaptionEn || '',
+    aiCaptionZh: p.aiCaptionZh || '',
+    aiTagsEn: p.aiTagsEn || [],
+    aiTagsZh: p.aiTagsZh || [],
+    url: `${origin}/api/shares/${token}/file`,
+  };
+}
+async function findSharedPhoto(env: Env, token: string) {
+  if (!SHARE_TOKEN_PATTERN.test(token)) return null;
+  return (await getAllPhotos(env)).find((p) => p.shareToken === token && !p.archived) || null;
+}
 async function setIndex(env: Env, photos: (Photo | PhotoIndexItem)[]) {
   const payload = JSON.stringify(photos.map((p) => compactPhotoForIndex(photoFromIndexItem(p as any))));
   const gz = await gzipText(payload);
@@ -269,6 +305,36 @@ async function setPhotoMeta(env: Env, photo: Photo) {
 async function deletePhotoMeta(env: Env, id: string) {
   const res = await d9(env, 'DELETE', metaPath(id));
   if (!res.ok && res.status !== 404) throw new Error(`drive9 delete ${metaPath(id)} failed: ${res.status} ${await res.text()}`);
+}
+
+async function proxyPhotoFile(req: Request, env: Env, photo: Photo, cacheControl: string, includeUpstreamDetail = false) {
+  const rangeHeader = req.headers.get('range');
+  const headers: HeadersInit = { authorization: `Bearer ${env.DRIVE9_API_KEY}` };
+  if (rangeHeader) headers['range'] = rangeHeader;
+  const obj = await fetch(fsUrl(env, photo.objectKey), { method: 'GET', headers });
+  if (obj.status === 416) {
+    const respHeaders: Record<string, string> = { ...cors, 'cache-control': cacheControl };
+    const contentRange = obj.headers.get('content-range');
+    if (contentRange) respHeaders['content-range'] = contentRange;
+    return new Response(obj.body, { status: 416, headers: respHeaders });
+  }
+  if (!obj.ok && obj.status !== 206) {
+    const error: Record<string, unknown> = { error: 'drive9 read failed', status: obj.status };
+    if (includeUpstreamDetail) error.detail = await obj.text();
+    return json(error, { status: 502 });
+  }
+  const respHeaders: Record<string, string> = { ...cors, 'content-type': photo.mime, 'cache-control': cacheControl };
+  const contentLength = obj.headers.get('content-length');
+  if (contentLength) respHeaders['content-length'] = contentLength;
+  const acceptRanges = obj.headers.get('accept-ranges');
+  if (acceptRanges) respHeaders['accept-ranges'] = acceptRanges;
+  if (obj.status === 206) {
+    const contentRange = obj.headers.get('content-range');
+    if (contentRange) respHeaders['content-range'] = contentRange;
+    respHeaders['accept-ranges'] = 'bytes';
+    return new Response(obj.body, { status: 206, headers: respHeaders });
+  }
+  return new Response(obj.body, { headers: respHeaders });
 }
 
 
@@ -467,7 +533,13 @@ function openapi(origin: string) {
         post: { summary: 'Upload a photo or video into drive9 with metadata', requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' }, title: { type: 'string' }, tags: { type: 'string' }, note: { type: 'string' }, album: { type: 'string' }, owner: { type: 'string' } }, required: ['file'] } } } }, responses: { '201': { description: 'Created media item' } } }
       },
       '/api/photos/{id}': { patch: { summary: 'Update metadata/state' }, delete: { summary: 'Delete photo from drive9' } },
+      '/api/photos/{id}/share': {
+        post: { summary: 'Create or return the current public read-only share link for one media item' },
+        delete: { summary: 'Revoke the current share link for one media item' },
+      },
       '/api/photos/{id}/file': { get: { summary: 'Stream original media bytes from drive9 (supports Range for video)' } },
+      '/api/shares/{token}': { get: { summary: 'Read metadata for one publicly shared media item' } },
+      '/api/shares/{token}/file': { get: { summary: 'Stream one publicly shared media item using an unguessable token' } },
       '/api/collections': { get: { summary: 'Smart collections from drive9 metadata' } }
     }
   };
@@ -494,6 +566,20 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const body = await status.text().catch(() => '');
       return json({ ok: status.ok, service: 'drive9-photo-api', storage: 'drive9', drive9Status: status.status, drive9: body ? safeJson(body) : null, time: new Date().toISOString() }, { status: status.ok ? 200 : 503 });
     }
+    const sharedFileMatch = path.match(/^\/api\/shares\/([^/]+)\/file$/);
+    if (sharedFileMatch && req.method === 'GET') {
+      const token = sharedFileMatch[1];
+      const photo = await findSharedPhoto(env, token);
+      if (!photo) return json({ error: 'share not found' }, { status: 404 });
+      return proxyPhotoFile(req, env, photo, 'private, no-store');
+    }
+    const sharedMatch = path.match(/^\/api\/shares\/([^/]+)$/);
+    if (sharedMatch && req.method === 'GET') {
+      const token = sharedMatch[1];
+      const photo = await findSharedPhoto(env, token);
+      if (!photo) return json({ error: 'share not found' }, { status: 404 });
+      return json({ photo: photoForShare(photo, url.origin, token), storage: 'drive9' });
+    }
     if (path === '/api/photos' && req.method === 'GET') {
       const q = (url.searchParams.get('q') || '').trim();
       const tag = (url.searchParams.get('tag') || '').toLowerCase();
@@ -519,7 +605,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         ? rerankPhotoCandidates(matchingMetadata, q)
         : matchingMetadata.sort((a, b) => b.score - a.score || +new Date(b.photo.createdAt) - +new Date(a.photo.createdAt));
       const filtered = ordered
-        .map(({ photo, score }) => ({ ...photo, score, url: `${url.origin}/api/photos/${photo.id}/file` }));
+        .map(({ photo, score }) => ({ ...photoForManagement(photo, url.origin), score }));
       return json({ photos: filtered, count: filtered.length, storage: 'drive9' });
     }
     if (path === '/api/photos' && req.method === 'POST') {
@@ -571,38 +657,51 @@ async function handle(req: Request, env: Env): Promise<Response> {
       photos.unshift(photo);
       await setPhotoMeta(env, photo);
       await setIndex(env, photos);
-      return json({ photo: { ...photo, url: `${url.origin}/api/photos/${id}/file`, duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
+      return json({ photo: { ...photoForManagement(photo, url.origin), duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
     }
     const fileMatch = path.match(/^\/api\/photos\/([^/]+)\/file$/);
     if (fileMatch && req.method === 'GET') {
       const id = fileMatch[1];
       const photo = (await getAllPhotos(env)).find((p) => p.id === id && !p.archived);
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
-      const rangeHeader = req.headers.get('range');
-      const headers: HeadersInit = { authorization: `Bearer ${env.DRIVE9_API_KEY}` };
-      if (rangeHeader) headers['range'] = rangeHeader;
-      const obj = await fetch(fsUrl(env, photo.objectKey), { method: 'GET', headers });
-      if (obj.status === 416) {
-        const respHeaders: Record<string, string> = { ...cors };
-        const cr = obj.headers.get('content-range');
-        if (cr) respHeaders['content-range'] = cr;
-        return new Response(obj.body, { status: 416, headers: respHeaders });
+      return proxyPhotoFile(req, env, photo, 'public, max-age=31536000, immutable', true);
+    }
+    const shareActionMatch = path.match(/^\/api\/photos\/([^/]+)\/share$/);
+    if (shareActionMatch && req.method === 'POST') {
+      const id = shareActionMatch[1];
+      const photos = await getAllPhotos(env);
+      const photo = photos.find((candidate) => candidate.id === id && !candidate.archived);
+      if (!photo) return json({ error: 'photo not found' }, { status: 404 });
+      if (!photo.shareToken) {
+        const usedTokens = new Set(photos.map((candidate) => candidate.shareToken).filter(Boolean));
+        let token = generateShareToken();
+        while (usedTokens.has(token)) token = generateShareToken();
+        photo.shareToken = token;
+        photo.sharedAt = new Date().toISOString();
+        photo.updatedAt = photo.sharedAt;
+        await setPhotoMeta(env, photo);
       }
-      if (!obj.ok && obj.status !== 206) return json({ error: 'drive9 read failed', status: obj.status, detail: await obj.text() }, { status: 502 });
-      const respHeaders: Record<string, string> = { ...cors, 'content-type': photo.mime, 'cache-control': 'public, max-age=31536000, immutable' };
-      if (obj.status === 206) {
-        const cr = obj.headers.get('content-range');
-        if (cr) respHeaders['content-range'] = cr;
-        const cl = obj.headers.get('content-length');
-        if (cl) respHeaders['content-length'] = cl;
-        respHeaders['accept-ranges'] = 'bytes';
-        return new Response(obj.body, { status: 206, headers: respHeaders });
+      return json({
+        share: {
+          token: photo.shareToken,
+          url: `${url.origin}/api/shares/${photo.shareToken}`,
+          sharedAt: photo.sharedAt,
+        },
+        storage: 'drive9',
+      });
+    }
+    if (shareActionMatch && req.method === 'DELETE') {
+      const id = shareActionMatch[1];
+      const photos = await getAllPhotos(env);
+      const photo = photos.find((candidate) => candidate.id === id);
+      if (!photo) return json({ error: 'photo not found' }, { status: 404 });
+      if (photo.shareToken) {
+        photo.shareToken = undefined;
+        photo.sharedAt = undefined;
+        photo.updatedAt = new Date().toISOString();
+        await setPhotoMeta(env, photo);
       }
-      const cl = obj.headers.get('content-length');
-      if (cl) respHeaders['content-length'] = cl;
-      const ar = obj.headers.get('accept-ranges');
-      if (ar) respHeaders['accept-ranges'] = ar;
-      return new Response(obj.body, { headers: respHeaders });
+      return new Response(null, { status: 204, headers: cors });
     }
     const photoMatch = path.match(/^\/api\/photos\/([^/]+)$/);
     if (photoMatch && req.method === 'PATCH') {
@@ -623,10 +722,14 @@ async function handle(req: Request, env: Env): Promise<Response> {
         archived: typeof patch.archived === 'boolean' ? patch.archived : prev.archived,
         updatedAt: new Date().toISOString(),
       };
+      if (next.archived && !prev.archived) {
+        next.shareToken = undefined;
+        next.sharedAt = undefined;
+      }
       photos[i] = next;
       await setPhotoMeta(env, next);
       await setIndex(env, photos);
-      return json({ photo: { ...next, url: `${url.origin}/api/photos/${id}/file` }, storage: 'drive9' });
+      return json({ photo: photoForManagement(next, url.origin), storage: 'drive9' });
     }
     if (photoMatch && req.method === 'DELETE') {
       const id = photoMatch[1];
