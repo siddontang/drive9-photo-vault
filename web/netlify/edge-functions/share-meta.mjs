@@ -1,4 +1,4 @@
-import { injectShareMeta, shareMetaTags, shareToken } from './share-meta-core.mjs';
+import { injectShareMeta, shareMetaTags, shareToken } from '../lib/share-meta-core.mjs';
 
 export default async function shareMeta(request, context) {
   const response = await context.next();

@@ -11,3 +11,9 @@ export function isSharePath(pathname) {
 export function sharePageUrl(origin, token) {
   return `${String(origin).replace(/\/$/, '')}/s/${token}`;
 }
+
+export async function readShareResponse(response) {
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || 'Share is unavailable.');
+  return payload;
+}

@@ -15,7 +15,7 @@ type ImageTransformOutput = {
 };
 type ImagesBinding = {
   input(stream: ReadableStream<Uint8Array>): {
-    transform(options: { width: number; height: number; fit: 'scale-down' }): ImageTransformOutput;
+    transform(options: { width: number; height: number; fit: 'scale-down'; metadata: 'none' }): ImageTransformOutput;
   };
 };
 
@@ -95,6 +95,7 @@ const ALLOWED_VIDEO_MIME = new Set([
 ]);
 const VIDEO_SIZE_LIMIT = 40_000_000;
 const IMAGE_SIZE_LIMIT = 25 * 1024 * 1024;
+const IMAGE_SHARE_SIZE_LIMIT = 20_000_000;
 const LEGACY_MULTIPART_FILE_LIMIT = 25 * 1024 * 1024;
 const LEGACY_MULTIPART_REQUEST_LIMIT = LEGACY_MULTIPART_FILE_LIMIT + 1024 * 1024;
 const UPLOAD_METADATA_HEADER = 'x-photovault-upload-metadata';
@@ -512,7 +513,7 @@ async function createImageShareRendition(env: Env, photo: Photo) {
   if (!env.IMAGES) throw new ShareRenditionError('images_binding', 'image transformation is unavailable');
   const source = await drive9PhotoResponse(env, photo);
   const response = await env.IMAGES.input(source.body!)
-    .transform({ width: 2000, height: 2000, fit: 'scale-down' })
+    .transform({ width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' })
     .output({ format: 'image/jpeg', quality: 86, anim: false })
     .response();
   if (!response.ok) throw new ShareRenditionError('image_transform', `image transformation failed (${response.status})`);
@@ -545,6 +546,9 @@ async function deleteShareRenditions(env: Env, photo: Photo) {
 }
 
 async function createShareRenditions(env: Env, photo: Photo) {
+  if (inferMediaKind(photo) === 'image' && photo.size > IMAGE_SHARE_SIZE_LIMIT) {
+    throw new HttpError(422, 'This image is too large to share safely. Maximum shareable image size is 20 MB.');
+  }
   try {
     if (inferMediaKind(photo) === 'video') await createVideoShareRenditions(env, photo);
     else await createImageShareRendition(env, photo);
@@ -1042,5 +1046,5 @@ async function handle(req: Request, env: Env): Promise<Response> {
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
-export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT, UPLOAD_METADATA_HEADER };
+export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT, IMAGE_SHARE_SIZE_LIMIT, UPLOAD_METADATA_HEADER };
 export default { fetch: handle };

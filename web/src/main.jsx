@@ -8,7 +8,7 @@ import Lightbox from './Lightbox';
 import ShareActions from './ShareActions.jsx';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
-import { isSharePath, sharePageUrl, shareTokenFromPath } from './shareLink.js';
+import { isSharePath, readShareResponse, sharePageUrl, shareTokenFromPath } from './shareLink.js';
 import { buildStreamUploadRequest } from './uploadRequest.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
@@ -475,8 +475,7 @@ function App() {
     setError('');
     try {
       const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'POST' });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = await response.json();
+      const payload = await readShareResponse(response);
       const link = sharePageUrl(window.location.origin, payload.share.token);
       setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true } : item));
       setShareCopied(false);

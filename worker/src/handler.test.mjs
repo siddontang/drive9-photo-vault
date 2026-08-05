@@ -55,7 +55,7 @@ let mediaTransformCalls = [];
 const SAFE_IMAGE_RENDITION = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]);
 const SAFE_VIDEO_RENDITION = new TextEncoder().encode('privacy-safe-video');
 const SAFE_VIDEO_POSTER = new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0xff, 0xd9]);
-let imageRenditionBytes = SAFE_IMAGE_RENDITION;
+let imageRenditionBytes = null;
 let videoRenditionBytes = SAFE_VIDEO_RENDITION;
 let videoPosterBytes = SAFE_VIDEO_POSTER;
 
@@ -243,9 +243,10 @@ const imagesBinding = {
             });
             return {
               async response() {
-                await new Response(stream).arrayBuffer();
+                const source = new Uint8Array(await new Response(stream).arrayBuffer());
                 if (failImageTransform) return new Response('transform failed', { status: 415 });
-                return new Response(imageRenditionBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+                const body = imageRenditionBytes ?? (transform.metadata === 'none' ? SAFE_IMAGE_RENDITION : source);
+                return new Response(body, { status: 200, headers: { 'content-type': 'image/jpeg' } });
               },
             };
           },
@@ -308,7 +309,7 @@ function resetState() {
   imageTransformCalls = [];
   imageSourceFetches = [];
   mediaTransformCalls = [];
-  imageRenditionBytes = SAFE_IMAGE_RENDITION;
+  imageRenditionBytes = null;
   videoRenditionBytes = SAFE_VIDEO_RENDITION;
   videoPosterBytes = SAFE_VIDEO_POSTER;
 }
@@ -788,12 +789,46 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
     usedCfImage: false,
   }], 'private Drive9 bytes must be fetched with auth before entering the Images binding');
   assert.deepEqual(imageTransformCalls, [{
-    transform: { width: 2000, height: 2000, fit: 'scale-down' },
+    transform: { width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' },
     output: { format: 'image/jpeg', quality: 86, anim: false },
   }]);
   assert.notDeepEqual(SAFE_IMAGE_RENDITION, bytes, 'the public endpoint must never return original upload bytes');
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'GPSLatitude'), false);
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'http://ns.adobe.com/xap/1.0/'), false);
+});
+
+test('image sharing explicitly strips non-location EXIF copyright metadata', async () => {
+  resetState();
+  const source = new Uint8Array([
+    0xff, 0xd8,
+    ...new TextEncoder().encode('Exif\0\0Copyright=Private Studio'),
+    0xff, 0xd9,
+  ]);
+  const { body: { photo } } = await uploadFile('copyright.jpg', 'image/jpeg', source);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+
+  const stored = drive9Store.get(`/photovault/share-renditions/${photo.id}.jpg`);
+  assert.deepEqual(stored, SAFE_IMAGE_RENDITION);
+  assert.equal(containsBytes(stored, 'Exif\0\0'), false);
+  assert.equal(containsBytes(stored, 'Copyright'), false);
+  assert.equal(imageTransformCalls[0].transform.metadata, 'none');
+});
+
+test('image sharing reports the Images binding 20 MB input limit before fetching source bytes', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('large.jpg', 'image/jpeg', new Uint8Array([9, 8, 7]));
+  updatePhotoMeta(photo, { size: 20_000_001 });
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 422);
+  assert.deepEqual(await create.json(), {
+    error: 'This image is too large to share safely. Maximum shareable image size is 20 MB.',
+    storage: 'drive9',
+  });
+  assert.deepEqual(imageSourceFetches, []);
+  assert.deepEqual(imageTransformCalls, []);
 });
 
 test('POST /api/photos/:id/share creates metadata-stripped video and poster renditions', async () => {
