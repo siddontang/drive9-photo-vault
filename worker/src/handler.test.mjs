@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 class NodeDigestStream extends WritableStream {
   constructor(algorithm) {
@@ -52,6 +53,9 @@ let failMediaTransformMode = null;
 let imageTransformCalls = [];
 let imageSourceFetches = [];
 let mediaTransformCalls = [];
+let workerSubrequestCount = 0;
+let workerSubrequestLimit = Infinity;
+let workerDrive9Requests = [];
 const SAFE_IMAGE_RENDITION = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]);
 const SAFE_WEBP_RENDITION = new TextEncoder().encode('RIFF-safe-WEBP');
 const SAFE_VIDEO_RENDITION = new TextEncoder().encode('privacy-safe-video');
@@ -64,6 +68,13 @@ function containsBytes(bytes, needle) {
   return Buffer.from(bytes).includes(Buffer.from(needle));
 }
 
+function recordWorkerSubrequest() {
+  workerSubrequestCount++;
+  if (workerSubrequestCount > workerSubrequestLimit) {
+    throw new Error('Too many subrequests by single Worker invocation');
+  }
+}
+
 async function bodyBytes(body) {
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
@@ -73,12 +84,14 @@ async function bodyBytes(body) {
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
+  recordWorkerSubrequest();
   const u = typeof url === 'string' ? url : url.toString();
   const parsedURL = new URL(u);
   const method = opts.method || 'GET';
   // Extract the path portion after /v1/fs
   const fsMatch = u.match(/\/v1\/fs(\/.*?)(?:\?.*)?$/);
   const fsPath = fsMatch ? fsMatch[1] : null;
+  if (fsPath) workerDrive9Requests.push({ method, path: fsPath });
 
   if (method === 'GET' && fsPath && fsPath === failDrive9GetPath) {
     return new Response('sensitive upstream detail', { status: 503 });
@@ -244,6 +257,7 @@ const imagesBinding = {
         return this;
       },
       async output(output) {
+        recordWorkerSubrequest();
         const source = new Uint8Array(await new Response(stream).arrayBuffer());
         imageTransformCalls.push({
           transforms: structuredClone(transforms),
@@ -289,12 +303,14 @@ const mediaBinding = {
       transform(transform) {
         return {
           output(output) {
+            recordWorkerSubrequest();
             mediaTransformCalls.push({ transform: structuredClone(transform), output: structuredClone(output) });
             return mediaResult(stream, output);
           },
         };
       },
       output(output) {
+        recordWorkerSubrequest();
         mediaTransformCalls.push({ transform: null, output: structuredClone(output) });
         return mediaResult(stream, output);
       },
@@ -324,6 +340,9 @@ function resetState() {
   imageTransformCalls = [];
   imageSourceFetches = [];
   mediaTransformCalls = [];
+  workerSubrequestCount = 0;
+  workerSubrequestLimit = Infinity;
+  workerDrive9Requests = [];
   imageRenditionBytes = null;
   videoRenditionBytes = SAFE_VIDEO_RENDITION;
   videoPosterBytes = SAFE_VIDEO_POSTER;
@@ -819,6 +838,65 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'http://ns.adobe.com/xap/1.0/'), false);
 });
 
+test('share creation and public reads use bounded Drive9 requests for a large gallery', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('bounded.jpg', 'image/jpeg', new Uint8Array([1, 2, 3]));
+  const indexPath = '/photovault/index.json.gz';
+  const items = JSON.parse(gunzipSync(Buffer.from(drive9Store.get(indexPath))).toString());
+  const storedPhoto = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+
+  for (let index = 0; index < 55; index++) {
+    const id = `gallery-${index}`;
+    const item = {
+      ...items[0],
+      id,
+      title: id,
+      objectKey: `/photovault/photos/${id}.jpg`,
+      checksum: id,
+    };
+    items.push(item);
+    drive9Store.set(`/photovault/meta/${id}.json`, JSON.stringify({ ...storedPhoto, ...item }));
+  }
+  drive9Store.set(indexPath, new Uint8Array(gzipSync(Buffer.from(JSON.stringify(items)))));
+
+  workerSubrequestCount = 0;
+  workerSubrequestLimit = 8;
+  workerDrive9Requests = [];
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+  assert.equal(workerSubrequestCount, 8, 'share creation must fit the fake runtime budget including two Images calls');
+  assert.deepEqual(workerDrive9Requests, [
+    { method: 'GET', path: indexPath },
+    { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
+    { method: 'GET', path: photo.objectKey },
+    { method: 'PUT', path: `/photovault/share-renditions/${photo.id}.jpg` },
+    { method: 'PUT', path: `/photovault/meta/${photo.id}.json` },
+    { method: 'PUT', path: indexPath },
+  ]);
+
+  workerSubrequestCount = 0;
+  workerDrive9Requests = [];
+  const metadata = await handler(new Request(`http://localhost/api/shares/${share.token}`), env);
+  assert.equal(metadata.status, 200);
+  assert.equal(workerSubrequestCount, 2, 'public metadata lookup must use the indexed share token');
+  assert.deepEqual(workerDrive9Requests, [
+    { method: 'GET', path: indexPath },
+    { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
+  ]);
+
+  workerSubrequestCount = 0;
+  workerDrive9Requests = [];
+  const file = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(file.status, 200);
+  assert.equal(workerSubrequestCount, 3, 'public file lookup must stay constant-size');
+  assert.deepEqual(workerDrive9Requests, [
+    { method: 'GET', path: indexPath },
+    { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
+    { method: 'GET', path: `/photovault/share-renditions/${photo.id}.jpg` },
+  ]);
+});
+
 test('image sharing strips non-location EXIF copyright metadata through a metadata-free intermediate', async () => {
   resetState();
   const source = new Uint8Array([
@@ -976,12 +1054,15 @@ test('video share creation removes the completed video when poster transformatio
   assert.equal(stored.shareRenditionVersion, undefined);
 });
 
-test('an existing share lazily migrates to the privacy-safe rendition', async () => {
+test('resharing an existing token migrates it to the bounded public index and privacy-safe rendition', async () => {
   resetState();
   const { body: { photo } } = await uploadFile('legacy.jpg', 'image/jpeg', new Uint8Array([7, 6, 5]));
   const token = 'L'.repeat(32);
   updatePhotoMeta(photo, { shareToken: token, sharedAt: new Date().toISOString() });
 
+  const migrate = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(migrate.status, 200);
+  assert.equal((await migrate.json()).share.token, token);
   const metadata = await handler(new Request(`http://localhost/api/shares/${token}`), env);
   assert.equal(metadata.status, 200);
   const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
@@ -1022,8 +1103,10 @@ test('GET /api/shares/:token returns the same 404 for invalid, unshared, and rev
 
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
   const token = (await create.json()).share.token;
+  const staleSharedIndex = new Uint8Array(drive9Store.get('/photovault/index.json.gz'));
   const revoke = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'DELETE' }), env);
   assert.equal(revoke.status, 204);
+  drive9Store.set('/photovault/index.json.gz', staleSharedIndex);
 
   for (const suffix of ['', '/file', '/poster']) {
     const response = await handler(new Request(`http://localhost/api/shares/${token}${suffix}`), env);
