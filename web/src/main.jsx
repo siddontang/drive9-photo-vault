@@ -8,6 +8,7 @@ import Lightbox from './Lightbox';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
 import { isSharePath, sharePageUrl, shareTokenFromPath } from './shareLink.js';
+import { buildStreamUploadRequest } from './uploadRequest.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
 const apiUrl = (path) => `${API}${path}`;
@@ -367,14 +368,14 @@ function App() {
       let done = 0;
       for (const file of files) {
         setProgress(t.progressUploading(file.name, done + 1, files.length));
-        const fd = new FormData();
-        fd.set('file', file);
-        fd.set('owner', owner);
-        fd.set('title', file.name.replace(/\.[^.]+$/, '') || 'Untitled photo');
-        fd.set('tags', draft.tags || guessTags(file.name));
-        fd.set('album', 'Inbox');
-        fd.set('note', '');
-        const res = await fetch(apiUrl('/api/photos'), { method: 'POST', body: fd });
+        const request = buildStreamUploadRequest(file, {
+          owner,
+          title: file.name.replace(/\.[^.]+$/, '') || 'Untitled photo',
+          tags: draft.tags || guessTags(file.name),
+          album: 'Inbox',
+          note: '',
+        });
+        const res = await fetch(apiUrl('/api/photos'), request);
         setProgress(t.progressIndexing(done + 1, files.length));
         if (!res.ok) throw new Error(await res.text());
         const payload = await res.json();

@@ -1,5 +1,6 @@
 import { buildDrive9SemanticResult } from './semantic.js';
 import { rerankPhotoCandidates } from './search.js';
+import { drive9UploadStream, UploadBodySizeError } from './upload.js';
 
 export interface Env {
   DRIVE9_API_KEY: string;
@@ -69,8 +70,12 @@ const ALLOWED_VIDEO_MIME = new Set([
   'video/x-msvideo',
   'video/x-matroska',
 ]);
-const VIDEO_SIZE_LIMIT = 25 * 1024 * 1024;
+const VIDEO_SIZE_LIMIT = 40_000_000;
 const IMAGE_SIZE_LIMIT = 25 * 1024 * 1024;
+const LEGACY_MULTIPART_FILE_LIMIT = 25 * 1024 * 1024;
+const LEGACY_MULTIPART_REQUEST_LIMIT = LEGACY_MULTIPART_FILE_LIMIT + 1024 * 1024;
+const UPLOAD_METADATA_HEADER = 'x-photovault-upload-metadata';
+const MAX_UPLOAD_METADATA_HEADER_LENGTH = 16 * 1024;
 
 const VIDEO_EXT_MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
@@ -109,9 +114,124 @@ const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': `Content-Type, Authorization, ${UPLOAD_METADATA_HEADER}`,
   'Access-Control-Max-Age': '86400',
 };
+
+type UploadFields = {
+  name: string;
+  size: number;
+  owner: string;
+  title: string;
+  tags: string;
+  note: string;
+  album: string;
+};
+
+type IncomingUpload = {
+  fields: UploadFields;
+  mime: string;
+  stream: ReadableStream<Uint8Array>;
+};
+
+class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function uploadString(value: unknown, fallback: string, maxLength: number) {
+  return (typeof value === 'string' ? value : fallback).slice(0, maxLength);
+}
+
+function emptyUploadStream() {
+  return new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+}
+
+function streamUpload(req: Request): IncomingUpload | null {
+  const encoded = req.headers.get(UPLOAD_METADATA_HEADER);
+  if (encoded === null) return null;
+  if (encoded.length > MAX_UPLOAD_METADATA_HEADER_LENGTH) {
+    throw new HttpError(400, 'upload metadata is too large');
+  }
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(decodeURIComponent(encoded)) as Record<string, unknown>;
+  } catch {
+    throw new HttpError(400, 'invalid upload metadata');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new HttpError(400, 'invalid upload metadata');
+  }
+  if (typeof raw.name !== 'string' || !raw.name.trim()) {
+    throw new HttpError(400, 'upload filename is required');
+  }
+  if (!Number.isSafeInteger(raw.size) || (raw.size as number) < 0) {
+    throw new HttpError(400, 'invalid upload size');
+  }
+  const size = raw.size as number;
+  const contentLength = req.headers.get('content-length');
+  if (contentLength !== null) {
+    const parsedLength = Number(contentLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength !== size) {
+      throw new HttpError(400, 'content-length does not match the declared upload size');
+    }
+  }
+
+  return {
+    fields: {
+      name: uploadString(raw.name, '', 500),
+      size,
+      owner: uploadString(raw.owner, 'guest', 120),
+      title: uploadString(raw.title, '', 160),
+      tags: uploadString(raw.tags, '', 2000),
+      note: uploadString(raw.note, '', 500),
+      album: uploadString(raw.album, 'Inbox', 80),
+    },
+    mime: (req.headers.get('content-type') || '').slice(0, 200),
+    stream: req.body || emptyUploadStream(),
+  };
+}
+
+async function incomingUpload(req: Request): Promise<IncomingUpload> {
+  const streamed = streamUpload(req);
+  if (streamed) return streamed;
+  if (!(req.headers.get('content-type') || '').toLowerCase().startsWith('multipart/form-data')) {
+    throw new HttpError(415, `expected a raw file body with ${UPLOAD_METADATA_HEADER} or multipart/form-data`);
+  }
+
+  const contentLength = Number(req.headers.get('content-length'));
+  if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+    throw new HttpError(411, 'content-length is required for legacy multipart uploads');
+  }
+  if (contentLength > LEGACY_MULTIPART_REQUEST_LIMIT) {
+    throw new HttpError(413, 'legacy multipart upload limit is 25MiB; use the streaming upload API for larger videos');
+  }
+
+  const form = await req.formData();
+  const file = form.get('file');
+  if (!(file instanceof File)) throw new HttpError(400, 'file field is required');
+  if (file.size > LEGACY_MULTIPART_FILE_LIMIT) {
+    throw new HttpError(413, 'legacy multipart file limit is 25MiB; use the streaming upload API for larger videos');
+  }
+  return {
+    fields: {
+      name: file.name,
+      size: file.size,
+      owner: uploadString(form.get('owner'), 'guest', 120),
+      title: uploadString(form.get('title'), '', 160),
+      tags: uploadString(form.get('tags'), '', 2000),
+      note: uploadString(form.get('note'), '', 500),
+      album: uploadString(form.get('album'), 'Inbox', 80),
+    },
+    mime: file.type,
+    stream: file.stream(),
+  };
+}
 
 function json(data: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -121,10 +241,6 @@ function json(data: unknown, init: ResponseInit = {}) {
 }
 function text(data: string, init: ResponseInit = {}) {
   return new Response(data, { ...init, headers: { 'content-type': 'text/plain; charset=utf-8', ...cors, ...(init.headers || {}) } });
-}
-async function sha256(buf: ArrayBuffer) {
-  const digest = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 function generateShareToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(SHARE_TOKEN_BYTES));
@@ -462,62 +578,6 @@ export function drive9SemanticContentPresent(meta: unknown): boolean {
   // An object-shaped semantic_text with any keys also counts as produced content.
   return !!value && typeof value === 'object' && Object.keys(value as object).length > 0;
 }
-type Drive9UploadPlan = { upload_id: string; part_size: number; total_parts: number };
-type Drive9PresignedPart = { number: number; url: string; size: number; headers?: Record<string, string> };
-type Drive9CompletePart = { number: number; etag: string };
-const DIRECT_PUT_LIMIT = 50_000;
-
-async function drive9Upload(env: Env, path: string, buf: ArrayBuffer, mime: string, description: string, tags: Record<string, string> = {}) {
-  if (buf.byteLength < DIRECT_PUT_LIMIT) {
-    const res = await d9(env, 'PUT', path, buf, {
-      'content-type': mime,
-      'x-dat9-description': description,
-      ...Object.fromEntries(Object.entries(tags).map(([k, v]) => [`x-dat9-tag-${k}`, v])),
-    });
-    if (!res.ok) throw new Error(`drive9 direct upload failed: ${res.status} ${await res.text()}`);
-    return;
-  }
-
-  const init = await fetch(`${drive9Base(env)}/v2/uploads/initiate`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ path, total_size: buf.byteLength, description }),
-  });
-  if (!init.ok) throw new Error(`drive9 multipart initiate failed: ${init.status} ${await init.text()}`);
-  const plan = await init.json() as Drive9UploadPlan;
-
-  const batchSize = 8;
-  const completed: Drive9CompletePart[] = [];
-  for (let start = 1; start <= plan.total_parts; start += batchSize) {
-    const end = Math.min(plan.total_parts, start + batchSize - 1);
-    const presign = await fetch(`${drive9Base(env)}/v2/uploads/${plan.upload_id}/presign-batch`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ parts: Array.from({ length: end - start + 1 }, (_, i) => ({ part_number: start + i })) }),
-    });
-    if (!presign.ok) throw new Error(`drive9 multipart presign failed: ${presign.status} ${await presign.text()}`);
-    const presigned = await presign.json() as { parts: Drive9PresignedPart[] };
-    const uploaded = await Promise.all(presigned.parts.map(async (part: Drive9PresignedPart) => {
-      const offset = (part.number - 1) * plan.part_size;
-      const chunk = buf.slice(offset, offset + part.size);
-      const headers = new Headers(part.headers || {});
-      headers.delete('host');
-      const up = await fetch(part.url, { method: 'PUT', headers, body: chunk });
-      if (!up.ok) throw new Error(`drive9 part ${part.number} upload failed: ${up.status} ${await up.text()}`);
-      return { number: part.number, etag: up.headers.get('etag') || '' };
-    }));
-    completed.push(...uploaded);
-  }
-
-  completed.sort((a, b) => a.number - b.number);
-  const complete = await fetch(`${drive9Base(env)}/v2/uploads/${plan.upload_id}/complete`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ parts: completed, tags }),
-  });
-  if (!complete.ok) throw new Error(`drive9 multipart complete failed: ${complete.status} ${await complete.text()}`);
-}
-
 function openapi(origin: string) {
   return {
     openapi: '3.1.0',
@@ -530,7 +590,13 @@ function openapi(origin: string) {
           { name: 'q', in: 'query', schema: { type: 'string' } }, { name: 'tag', in: 'query', schema: { type: 'string' } },
           { name: 'owner', in: 'query', schema: { type: 'string' } }, { name: 'favorite', in: 'query', schema: { type: 'boolean' } }
         ], responses: { '200': { description: 'Photo list' } } },
-        post: { summary: 'Upload a photo or video into drive9 with metadata', requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' }, title: { type: 'string' }, tags: { type: 'string' }, note: { type: 'string' }, album: { type: 'string' }, owner: { type: 'string' } }, required: ['file'] } } } }, responses: { '201': { description: 'Created media item' } } }
+        post: {
+          summary: 'Stream a photo or video into drive9 with metadata',
+          description: `Send the file as the raw request body. ${UPLOAD_METADATA_HEADER} is encodeURIComponent(JSON) with name, size, title, tags, note, album, and owner. Videos support exactly 40,000,000 bytes; images support 25MiB. Legacy multipart/form-data remains compatible up to 25MiB.`,
+          parameters: [{ name: UPLOAD_METADATA_HEADER, in: 'header', required: false, schema: { type: 'string' } }],
+          requestBody: { content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } }, 'multipart/form-data': { schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' }, title: { type: 'string' }, tags: { type: 'string' }, note: { type: 'string' }, album: { type: 'string' }, owner: { type: 'string' } }, required: ['file'] } } } },
+          responses: { '201': { description: 'Created media item' }, '413': { description: 'Media exceeds its size limit' } },
+        }
       },
       '/api/photos/{id}': { patch: { summary: 'Update metadata/state' }, delete: { summary: 'Delete photo from drive9' } },
       '/api/photos/{id}/share': {
@@ -609,55 +675,69 @@ async function handle(req: Request, env: Env): Promise<Response> {
       return json({ photos: filtered, count: filtered.length, storage: 'drive9' });
     }
     if (path === '/api/photos' && req.method === 'POST') {
-      const form = await req.formData();
-      const file = form.get('file');
-      if (!(file instanceof File)) return json({ error: 'file field is required' }, { status: 400 });
-      const kind = mediaKindFromMime(file.type, file.name);
-      if (!kind) return json({ error: `unsupported file type: ${file.type || '(empty)'}. Accepted: image/*, video/mp4, video/quicktime, video/webm, video/x-msvideo, video/x-matroska` }, { status: 400 });
-      const resolvedMime = kind === 'video' ? (effectiveVideoMime(file.type, file.name) || file.type) : file.type;
+      const upload = await incomingUpload(req);
+      const { fields } = upload;
+      const kind = mediaKindFromMime(upload.mime, fields.name);
+      if (!kind) return json({ error: `unsupported file type: ${upload.mime || '(empty)'}. Accepted: image/*, video/mp4, video/quicktime, video/webm, video/x-msvideo, video/x-matroska` }, { status: 400 });
+      const resolvedMime = kind === 'video'
+        ? (effectiveVideoMime(upload.mime, fields.name) || upload.mime)
+        : upload.mime.split(';')[0].trim().toLowerCase();
       const sizeLimit = kind === 'video' ? VIDEO_SIZE_LIMIT : IMAGE_SIZE_LIMIT;
-      if (file.size > sizeLimit) return json({ error: `demo limit: ${sizeLimit / 1024 / 1024}MB per ${kind}` }, { status: 413 });
-      const buf = await file.arrayBuffer();
-      const checksum = await sha256(buf);
+      if (fields.size > sizeLimit) {
+        const limit = kind === 'video' ? '40MB' : '25MiB';
+        return json({ error: `upload limit: ${limit} per ${kind}` }, { status: 413 });
+      }
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
       const objectKey = `${ROOT}/photos/${id}.${extFor(resolvedMime)}`;
-      const tags = String(form.get('tags') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
-      const defaultTitle = file.name.replace(/\.[^.]+$/, '') || (kind === 'video' ? 'Untitled video' : 'Untitled photo');
+      const tags = fields.tags.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20);
+      const defaultTitle = fields.name.replace(/\.[^.]+$/, '') || (kind === 'video' ? 'Untitled video' : 'Untitled photo');
       const pendingCaption = kind === 'video'
         ? 'Uploaded video. drive9 is analyzing it; this may take a while.'
         : 'Uploaded image. drive9 is still analyzing it; search metadata may appear shortly.';
-      await drive9Upload(env, objectKey, buf, resolvedMime, [String(form.get('title') || file.name), String(form.get('note') || ''), String(form.get('album') || 'Inbox'), tags.join(' ')].filter(Boolean).join(' — '), { app: 'photovault', album: String(form.get('album') || 'Inbox') });
-      const photo: Photo = {
-        id,
-        owner: String(form.get('owner') || 'guest'),
-        title: String(form.get('title') || defaultTitle),
-        note: String(form.get('note') || ''),
-        tags,
-        album: String(form.get('album') || 'Inbox'),
-        mime: resolvedMime,
-        size: file.size,
-        objectKey,
-        checksum,
-        favorite: false,
-        archived: false,
-        createdAt: now,
-        updatedAt: now,
-        mediaKind: kind,
-        aiCaptionEn: pendingCaption,
-        aiCaptionZh: '',
-        aiTextEn: '',
-        aiTextZh: '',
-        aiTagsEn: [],
-        aiTagsZh: [],
-        analysisStatus: 'pending',
-      };
-      const photos = await getAllPhotos(env);
-      const dupes = photos.filter((p) => p.checksum === checksum).map((p) => p.id);
-      photos.unshift(photo);
-      await setPhotoMeta(env, photo);
-      await setIndex(env, photos);
-      return json({ photo: { ...photoForManagement(photo, url.origin), duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
+      const description = [fields.title || fields.name, fields.note, fields.album, tags.join(' ')].filter(Boolean).join(' — ');
+      let objectUploaded = false;
+      try {
+        const { checksum } = await drive9UploadStream(env, objectKey, upload.stream, fields.size, resolvedMime, description, { app: 'photovault', album: fields.album });
+        objectUploaded = true;
+        const photo: Photo = {
+          id,
+          owner: fields.owner,
+          title: fields.title || defaultTitle,
+          note: fields.note,
+          tags,
+          album: fields.album,
+          mime: resolvedMime,
+          size: fields.size,
+          objectKey,
+          checksum,
+          favorite: false,
+          archived: false,
+          createdAt: now,
+          updatedAt: now,
+          mediaKind: kind,
+          aiCaptionEn: pendingCaption,
+          aiCaptionZh: '',
+          aiTextEn: '',
+          aiTextZh: '',
+          aiTagsEn: [],
+          aiTagsZh: [],
+          analysisStatus: 'pending',
+        };
+        const photos = await getIndexItems(env);
+        const dupes = photos.filter((candidate) => candidate.checksum === checksum).map((candidate) => candidate.id);
+        await setPhotoMeta(env, photo);
+        await setIndex(env, [photo, ...photos]);
+        return json({ photo: { ...photoForManagement(photo, url.origin), duplicateOf: dupes }, duplicateOf: dupes, storage: 'drive9' }, { status: 201 });
+      } catch (error) {
+        if (objectUploaded) {
+          await Promise.allSettled([
+            d9(env, 'DELETE', objectKey),
+            deletePhotoMeta(env, id),
+          ]);
+        }
+        throw error;
+      }
     }
     const fileMatch = path.match(/^\/api\/photos\/([^/]+)\/file$/);
     if (fileMatch && req.method === 'GET') {
@@ -754,9 +834,10 @@ async function handle(req: Request, env: Env): Promise<Response> {
     }
     return json({ error: 'not found' }, { status: 404 });
   } catch (e: any) {
-    return json({ error: e?.message || String(e), storage: 'drive9' }, { status: 500 });
+    const status = e instanceof HttpError ? e.status : e instanceof UploadBodySizeError ? 400 : 500;
+    return json({ error: e?.message || String(e), storage: 'drive9' }, { status });
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
-export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT };
+export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT, UPLOAD_METADATA_HEADER };
 export default { fetch: handle };

@@ -64,7 +64,7 @@ Endpoints:
 
 - `GET /api/health`
 - `GET /api/photos?q=&tag=&owner=&favorite=`
-- `POST /api/photos` multipart upload
+- `POST /api/photos` streaming raw-body upload (legacy multipart remains compatible up to 25 MiB)
 - `PATCH /api/photos/:id`
 - `DELETE /api/photos/:id`
 - `POST /api/photos/:id/share`
@@ -127,7 +127,7 @@ Workflow file:
 - Current ownership is a lightweight browser-local `guest-*` id.
 - The gallery remains a public demo rather than a complete account/auth product. Share links use unguessable tokens, expose only one media item, and can be revoked; they are not a replacement for future authenticated library access.
 - Shared media currently streams the original uploaded bytes. The share page has no original-download action, but embedded EXIF/GPS/device metadata is not stripped; a privacy-preserving display rendition is future work.
-- **Video upload limit**: ≤25 MB per file. Videos are relayed through the Cloudflare Worker (128 MB heap), so large files are not supported in this demo.
+- **Upload limits**: videos support exactly 40,000,000 bytes (40 MB); images remain limited to 25 MiB. The web app streams the raw file body and the Worker forwards sequential Drive9 multipart chunks, so it never retains a whole video in memory. Legacy `multipart/form-data` uploads remain limited to 25 MiB because parsing them buffers the request.
 - **Video playback**: the Worker proxies the file from drive9. HTTP Range requests are forwarded when drive9 supports them; otherwise the full file is downloaded. For short demo clips this is acceptable.
 - **Video analysis**: drive9 video visual extraction takes longer than image analysis. A video may show "analyzing…" for up to several minutes; if analysis has not completed after 10 minutes the UI marks it as timed out.
 
