@@ -171,15 +171,27 @@ type IncomingUpload = {
 
 class HttpError extends Error {
   readonly status: number;
+  readonly code?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
+type ShareRenditionStage =
+  | 'source_fetch'
+  | 'images_binding'
+  | 'image_transform'
+  | 'media_binding'
+  | 'video_transform'
+  | 'video_poster_transform'
+  | 'privacy_scan'
+  | 'rendition_write';
+
 class ShareRenditionError extends Error {
-  constructor(readonly stage: string, message: string) {
+  constructor(readonly stage: ShareRenditionStage, message: string) {
     super(message);
   }
 }
@@ -460,9 +472,14 @@ function sharePosterPath(photo: Photo) {
 }
 
 async function drive9PhotoResponse(env: Env, photo: Photo) {
-  const response = await fetch(fsUrl(env, photo.objectKey), {
-    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
-  });
+  let response: Response;
+  try {
+    response = await fetch(fsUrl(env, photo.objectKey), {
+      headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
+    });
+  } catch {
+    throw new ShareRenditionError('source_fetch', 'source media unavailable');
+  }
   if (!response.ok || !response.body) {
     throw new ShareRenditionError('source_fetch', `source media unavailable (${response.status})`);
   }
@@ -512,10 +529,15 @@ async function writeShareRendition(env: Env, path: string, mime: string, body: R
 async function createImageShareRendition(env: Env, photo: Photo) {
   if (!env.IMAGES) throw new ShareRenditionError('images_binding', 'image transformation is unavailable');
   const source = await drive9PhotoResponse(env, photo);
-  const response = await env.IMAGES.input(source.body!)
-    .transform({ width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' })
-    .output({ format: 'image/jpeg', quality: 86, anim: false })
-    .response();
+  let response: Response;
+  try {
+    response = await env.IMAGES.input(source.body!)
+      .transform({ width: 2000, height: 2000, fit: 'scale-down', metadata: 'none' })
+      .output({ format: 'image/jpeg', quality: 86, anim: false })
+      .response();
+  } catch {
+    throw new ShareRenditionError('image_transform', 'image transformation failed');
+  }
   if (!response.ok) throw new ShareRenditionError('image_transform', `image transformation failed (${response.status})`);
   await writeShareRendition(env, shareDisplayPath(photo), 'image/jpeg', response.body);
 }
@@ -553,14 +575,18 @@ async function createShareRenditions(env: Env, photo: Photo) {
     if (inferMediaKind(photo) === 'video') await createVideoShareRenditions(env, photo);
     else await createImageShareRendition(env, photo);
   } catch (error) {
+    const stage = error instanceof ShareRenditionError ? error.stage : 'unknown';
     console.error('share rendition failed', {
       photoId: photo.id,
       mediaKind: inferMediaKind(photo),
-      stage: error instanceof ShareRenditionError ? error.stage : 'unknown',
+      stage,
       reason: error instanceof Error ? error.message : 'unknown error',
     });
     await deleteShareRenditions(env, photo);
-    throw new HttpError(502, 'could not prepare a privacy-safe share rendition');
+    const code = error instanceof ShareRenditionError
+      ? `share_rendition_${error.stage}`
+      : 'share_rendition_unavailable';
+    throw new HttpError(502, 'could not prepare a privacy-safe share rendition', code);
   }
 }
 
@@ -1038,11 +1064,16 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (!(e instanceof HttpError)) console.warn('public share request failed', e);
       return json({
         error: e instanceof HttpError ? e.message : 'share temporarily unavailable',
+        ...(e instanceof HttpError && e.code ? { code: e.code } : {}),
         storage: 'drive9',
       }, { status: e instanceof HttpError ? e.status : 503 });
     }
     const status = e instanceof HttpError ? e.status : e instanceof UploadBodySizeError ? 400 : 500;
-    return json({ error: e?.message || String(e), storage: 'drive9' }, { status });
+    return json({
+      error: e?.message || String(e),
+      ...(e instanceof HttpError && e.code ? { code: e.code } : {}),
+      storage: 'drive9',
+    }, { status });
   }
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
