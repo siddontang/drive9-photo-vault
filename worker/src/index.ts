@@ -5,8 +5,19 @@ import { drive9UploadStream, UploadBodySizeError } from './upload.js';
 export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
+  IMAGES?: ImagesBinding;
   MEDIA?: MediaTransformBinding;
 }
+
+type ImageTransformResult = { response(): Response | Promise<Response> };
+type ImageTransformOutput = {
+  output(options: { format: 'image/jpeg'; quality: number; anim: false }): ImageTransformResult;
+};
+type ImagesBinding = {
+  input(stream: ReadableStream<Uint8Array>): {
+    transform(options: { width: number; height: number; fit: 'scale-down' }): ImageTransformOutput;
+  };
+};
 
 type MediaTransformResult = { response(): Promise<Response> };
 type MediaTransformOutput = {
@@ -163,6 +174,12 @@ class HttpError extends Error {
   constructor(status: number, message: string) {
     super(message);
     this.status = status;
+  }
+}
+
+class ShareRenditionError extends Error {
+  constructor(readonly stage: string, message: string) {
+    super(message);
   }
 }
 
@@ -445,7 +462,9 @@ async function drive9PhotoResponse(env: Env, photo: Photo) {
   const response = await fetch(fsUrl(env, photo.objectKey), {
     headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
   });
-  if (!response.ok || !response.body) throw new Error(`source media unavailable (${response.status})`);
+  if (!response.ok || !response.body) {
+    throw new ShareRenditionError('source_fetch', `source media unavailable (${response.status})`);
+  }
   return response;
 }
 
@@ -467,7 +486,7 @@ async function writeShareRendition(env: Env, path: string, mime: string, body: R
               break;
             }
           }
-          if (matches) throw new Error('transformation retained private metadata');
+          if (matches) throw new ShareRenditionError('privacy_scan', 'transformation retained private metadata');
           i++;
         }
       }
@@ -476,41 +495,39 @@ async function writeShareRendition(env: Env, path: string, mime: string, body: R
       controller.enqueue(chunk);
     },
   }));
-  const response = await d9(env, 'PUT', path, checkedBody, {
-    'content-type': mime,
-    'x-dat9-description': 'PhotoVault privacy-safe public share rendition',
-  });
-  if (!response.ok) throw new Error(`rendition write failed (${response.status})`);
+  let response: Response;
+  try {
+    response = await d9(env, 'PUT', path, checkedBody, {
+      'content-type': mime,
+      'x-dat9-description': 'PhotoVault privacy-safe public share rendition',
+    });
+  } catch (error) {
+    if (error instanceof ShareRenditionError) throw error;
+    throw new ShareRenditionError('rendition_write', 'rendition write failed');
+  }
+  if (!response.ok) throw new ShareRenditionError('rendition_write', `rendition write failed (${response.status})`);
 }
 
 async function createImageShareRendition(env: Env, photo: Photo) {
-  const response = await fetch(fsUrl(env, photo.objectKey), {
-    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
-    cf: {
-      image: {
-        width: 2000,
-        height: 2000,
-        fit: 'scale-down',
-        format: 'jpeg',
-        quality: 86,
-        metadata: 'none',
-        anim: false,
-      },
-    },
-  } as RequestInit & { cf: Record<string, unknown> });
-  if (!response.ok) throw new Error(`image transformation failed (${response.status})`);
+  if (!env.IMAGES) throw new ShareRenditionError('images_binding', 'image transformation is unavailable');
+  const source = await drive9PhotoResponse(env, photo);
+  const response = await env.IMAGES.input(source.body!)
+    .transform({ width: 2000, height: 2000, fit: 'scale-down' })
+    .output({ format: 'image/jpeg', quality: 86, anim: false })
+    .response();
+  if (!response.ok) throw new ShareRenditionError('image_transform', `image transformation failed (${response.status})`);
   await writeShareRendition(env, shareDisplayPath(photo), 'image/jpeg', response.body);
 }
 
 async function createVideoShareRenditions(env: Env, photo: Photo) {
-  if (!env.MEDIA) throw new Error('media transformation is unavailable');
+  if (!env.MEDIA) throw new ShareRenditionError('media_binding', 'media transformation is unavailable');
 
   const videoSource = await drive9PhotoResponse(env, photo);
   const video = await env.MEDIA.input(videoSource.body!)
     .transform({ width: 1920, height: 1080, fit: 'scale-down' })
     .output({ mode: 'video', audio: true })
     .response();
-  if (!video.ok) throw new Error(`video transformation failed (${video.status})`);
+  if (!video.ok) throw new ShareRenditionError('video_transform', `video transformation failed (${video.status})`);
   await writeShareRendition(env, shareDisplayPath(photo), 'video/mp4', video.body);
 
   const posterSource = await drive9PhotoResponse(env, photo);
@@ -518,7 +535,7 @@ async function createVideoShareRenditions(env: Env, photo: Photo) {
     .transform({ width: 1600, height: 1200, fit: 'scale-down' })
     .output({ mode: 'frame', time: '0s', format: 'jpg' })
     .response();
-  if (!poster.ok) throw new Error(`video poster transformation failed (${poster.status})`);
+  if (!poster.ok) throw new ShareRenditionError('video_poster_transform', `video poster transformation failed (${poster.status})`);
   await writeShareRendition(env, sharePosterPath(photo), 'image/jpeg', poster.body);
 }
 
@@ -531,7 +548,13 @@ async function createShareRenditions(env: Env, photo: Photo) {
   try {
     if (inferMediaKind(photo) === 'video') await createVideoShareRenditions(env, photo);
     else await createImageShareRendition(env, photo);
-  } catch {
+  } catch (error) {
+    console.error('share rendition failed', {
+      photoId: photo.id,
+      mediaKind: inferMediaKind(photo),
+      stage: error instanceof ShareRenditionError ? error.stage : 'unknown',
+      reason: error instanceof Error ? error.message : 'unknown error',
+    });
     await deleteShareRenditions(env, photo);
     throw new HttpError(502, 'could not prepare a privacy-safe share rendition');
   }

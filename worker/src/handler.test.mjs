@@ -50,6 +50,7 @@ let failImageTransform = false;
 let failMediaTransform = false;
 let failMediaTransformMode = null;
 let imageTransformCalls = [];
+let imageSourceFetches = [];
 let mediaTransformCalls = [];
 const SAFE_IMAGE_RENDITION = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]);
 const SAFE_VIDEO_RENDITION = new TextEncoder().encode('privacy-safe-video');
@@ -77,13 +78,6 @@ globalThis.fetch = async (url, opts = {}) => {
   // Extract the path portion after /v1/fs
   const fsMatch = u.match(/\/v1\/fs(\/.*?)(?:\?.*)?$/);
   const fsPath = fsMatch ? fsMatch[1] : null;
-
-  if (method === 'GET' && fsPath && opts.cf?.image) {
-    imageTransformCalls.push(structuredClone(opts.cf.image));
-    if (failImageTransform) return new Response('transform failed', { status: 415 });
-    if (!drive9Store.has(fsPath)) return new Response('not found', { status: 404 });
-    return new Response(imageRenditionBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
-  }
 
   if (method === 'GET' && fsPath && fsPath === failDrive9GetPath) {
     return new Response('sensitive upstream detail', { status: 503 });
@@ -175,6 +169,14 @@ globalThis.fetch = async (url, opts = {}) => {
   if (method === 'GET' && fsPath) {
     const data = drive9Store.get(fsPath);
     if (data === undefined) return new Response('not found', { status: 404 });
+    if (fsPath.startsWith('/photovault/photos/')) {
+      const headers = new Headers(opts.headers || {});
+      imageSourceFetches.push({
+        path: fsPath,
+        authorization: headers.get('authorization'),
+        usedCfImage: Boolean(opts.cf?.image),
+      });
+    }
 
     // Handle Range requests for file proxy tests
     const rangeHdr = typeof opts.headers === 'object' && !(opts.headers instanceof Headers)
@@ -229,6 +231,30 @@ globalThis.fetch = async (url, opts = {}) => {
 const worker = await import('../dist/index.js');
 const handler = worker.default.fetch || worker.default.default?.fetch;
 
+const imagesBinding = {
+  input(stream) {
+    return {
+      transform(transform) {
+        return {
+          output(output) {
+            imageTransformCalls.push({
+              transform: structuredClone(transform),
+              output: structuredClone(output),
+            });
+            return {
+              async response() {
+                await new Response(stream).arrayBuffer();
+                if (failImageTransform) return new Response('transform failed', { status: 415 });
+                return new Response(imageRenditionBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+              },
+            };
+          },
+        };
+      },
+    };
+  },
+};
+
 function mediaResult(stream, output) {
   return {
     async response() {
@@ -260,7 +286,7 @@ const mediaBinding = {
   },
 };
 
-const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999', MEDIA: mediaBinding };
+const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999', IMAGES: imagesBinding, MEDIA: mediaBinding };
 
 function resetState() {
   drive9Store.clear();
@@ -280,6 +306,7 @@ function resetState() {
   failMediaTransform = false;
   failMediaTransformMode = null;
   imageTransformCalls = [];
+  imageSourceFetches = [];
   mediaTransformCalls = [];
   imageRenditionBytes = SAFE_IMAGE_RENDITION;
   videoRenditionBytes = SAFE_VIDEO_RENDITION;
@@ -755,14 +782,14 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   assert.equal(range.headers.get('cache-control'), 'private, no-store');
   assert.deepEqual(new Uint8Array(await range.arrayBuffer()), SAFE_IMAGE_RENDITION.slice(1, 4));
 
+  assert.deepEqual(imageSourceFetches, [{
+    path: photo.objectKey,
+    authorization: 'Bearer test-key',
+    usedCfImage: false,
+  }], 'private Drive9 bytes must be fetched with auth before entering the Images binding');
   assert.deepEqual(imageTransformCalls, [{
-    width: 2000,
-    height: 2000,
-    fit: 'scale-down',
-    format: 'jpeg',
-    quality: 86,
-    metadata: 'none',
-    anim: false,
+    transform: { width: 2000, height: 2000, fit: 'scale-down' },
+    output: { format: 'image/jpeg', quality: 86, anim: false },
   }]);
   assert.notDeepEqual(SAFE_IMAGE_RENDITION, bytes, 'the public endpoint must never return original upload bytes');
   assert.equal(containsBytes(SAFE_IMAGE_RENDITION, 'GPSLatitude'), false);
