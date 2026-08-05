@@ -5,7 +5,18 @@ import { drive9UploadStream, UploadBodySizeError } from './upload.js';
 export interface Env {
   DRIVE9_API_KEY: string;
   DRIVE9_SERVER?: string;
+  MEDIA?: MediaTransformBinding;
 }
+
+type MediaTransformResult = { response(): Promise<Response> };
+type MediaTransformOutput = {
+  output(options: { mode: 'video' | 'frame'; time?: string; format?: 'jpg'; audio?: boolean }): MediaTransformResult;
+};
+type MediaTransformBinding = {
+  input(stream: ReadableStream<Uint8Array>): MediaTransformOutput & {
+    transform(options: { width: number; height: number; fit: 'scale-down' }): MediaTransformOutput;
+  };
+};
 
 type MediaKind = 'image' | 'video';
 
@@ -36,6 +47,7 @@ type Photo = {
   analysisStatus?: string;
   shareToken?: string;
   sharedAt?: string;
+  shareRenditionVersion?: number;
 };
 
 type PhotoIndexItem = {
@@ -111,6 +123,17 @@ const ROOT = '/photovault';
 const META_ROOT = `${ROOT}/meta`;
 const SHARE_TOKEN_BYTES = 24;
 const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+const SHARE_RENDITION_ROOT = `${ROOT}/share-renditions`;
+const SHARE_RENDITION_VERSION = 1;
+const SHARE_PRIVATE_METADATA_MARKERS = [
+  new TextEncoder().encode('Exif\0\0'),
+  new TextEncoder().encode('http://ns.adobe.com/xap/1.0/'),
+  new TextEncoder().encode('GPSLatitude'),
+  new TextEncoder().encode('GPSLongitude'),
+  new TextEncoder().encode('com.apple.quicktime.location.ISO6709'),
+  new Uint8Array([0xa9, 0x78, 0x79, 0x7a]),
+];
+const SHARE_PRIVATE_METADATA_TAIL = Math.max(...SHARE_PRIVATE_METADATA_MARKERS.map((marker) => marker.length)) - 1;
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
@@ -382,7 +405,7 @@ function compactPhotoMeta(p: Photo): Photo {
   };
 }
 function photoForManagement(p: Photo, origin: string) {
-  const { shareToken: _shareToken, sharedAt: _sharedAt, ...photo } = p;
+  const { shareToken: _shareToken, sharedAt: _sharedAt, shareRenditionVersion: _shareRenditionVersion, ...photo } = p;
   return {
     ...photo,
     shared: !!p.shareToken,
@@ -406,6 +429,124 @@ function photoForShare(p: Photo, origin: string, token: string) {
 async function findSharedPhoto(env: Env, token: string) {
   if (!SHARE_TOKEN_PATTERN.test(token)) return null;
   return (await getAllPhotos(env)).find((p) => p.shareToken === token && !p.archived) || null;
+}
+
+function shareDisplayPath(photo: Photo) {
+  return `${SHARE_RENDITION_ROOT}/${photo.id}.${inferMediaKind(photo) === 'video' ? 'mp4' : 'jpg'}`;
+}
+
+function sharePosterPath(photo: Photo) {
+  return inferMediaKind(photo) === 'video'
+    ? `${SHARE_RENDITION_ROOT}/${photo.id}.poster.jpg`
+    : shareDisplayPath(photo);
+}
+
+async function drive9PhotoResponse(env: Env, photo: Photo) {
+  const response = await fetch(fsUrl(env, photo.objectKey), {
+    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
+  });
+  if (!response.ok || !response.body) throw new Error(`source media unavailable (${response.status})`);
+  return response;
+}
+
+async function writeShareRendition(env: Env, path: string, mime: string, body: ReadableStream<Uint8Array> | null) {
+  if (!body) throw new Error('transformation returned an empty body');
+  let tail = new Uint8Array(0);
+  const checkedBody = body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      const combined = new Uint8Array(tail.byteLength + chunk.byteLength);
+      combined.set(tail);
+      combined.set(chunk, tail.byteLength);
+      for (const marker of SHARE_PRIVATE_METADATA_MARKERS) {
+        let i = 0;
+        while ((i = combined.indexOf(marker[0], i)) >= 0 && i <= combined.byteLength - marker.byteLength) {
+          let matches = true;
+          for (let j = 0; j < marker.byteLength; j++) {
+            if (combined[i + j] !== marker[j]) {
+              matches = false;
+              break;
+            }
+          }
+          if (matches) throw new Error('transformation retained private metadata');
+          i++;
+        }
+      }
+      const tailLength = Math.min(SHARE_PRIVATE_METADATA_TAIL, combined.byteLength);
+      tail = combined.slice(combined.byteLength - tailLength);
+      controller.enqueue(chunk);
+    },
+  }));
+  const response = await d9(env, 'PUT', path, checkedBody, {
+    'content-type': mime,
+    'x-dat9-description': 'PhotoVault privacy-safe public share rendition',
+  });
+  if (!response.ok) throw new Error(`rendition write failed (${response.status})`);
+}
+
+async function createImageShareRendition(env: Env, photo: Photo) {
+  const response = await fetch(fsUrl(env, photo.objectKey), {
+    headers: { authorization: `Bearer ${env.DRIVE9_API_KEY}` },
+    cf: {
+      image: {
+        width: 2000,
+        height: 2000,
+        fit: 'scale-down',
+        format: 'jpeg',
+        quality: 86,
+        metadata: 'none',
+        anim: false,
+      },
+    },
+  } as RequestInit & { cf: Record<string, unknown> });
+  if (!response.ok) throw new Error(`image transformation failed (${response.status})`);
+  await writeShareRendition(env, shareDisplayPath(photo), 'image/jpeg', response.body);
+}
+
+async function createVideoShareRenditions(env: Env, photo: Photo) {
+  if (!env.MEDIA) throw new Error('media transformation is unavailable');
+
+  const videoSource = await drive9PhotoResponse(env, photo);
+  const video = await env.MEDIA.input(videoSource.body!)
+    .transform({ width: 1920, height: 1080, fit: 'scale-down' })
+    .output({ mode: 'video', audio: true })
+    .response();
+  if (!video.ok) throw new Error(`video transformation failed (${video.status})`);
+  await writeShareRendition(env, shareDisplayPath(photo), 'video/mp4', video.body);
+
+  const posterSource = await drive9PhotoResponse(env, photo);
+  const poster = await env.MEDIA.input(posterSource.body!)
+    .transform({ width: 1600, height: 1200, fit: 'scale-down' })
+    .output({ mode: 'frame', time: '0s', format: 'jpg' })
+    .response();
+  if (!poster.ok) throw new Error(`video poster transformation failed (${poster.status})`);
+  await writeShareRendition(env, sharePosterPath(photo), 'image/jpeg', poster.body);
+}
+
+async function deleteShareRenditions(env: Env, photo: Photo) {
+  const paths = [...new Set([shareDisplayPath(photo), sharePosterPath(photo)])];
+  await Promise.allSettled(paths.map((path) => d9(env, 'DELETE', path)));
+}
+
+async function createShareRenditions(env: Env, photo: Photo) {
+  try {
+    if (inferMediaKind(photo) === 'video') await createVideoShareRenditions(env, photo);
+    else await createImageShareRendition(env, photo);
+  } catch {
+    await deleteShareRenditions(env, photo);
+    throw new HttpError(502, 'could not prepare a privacy-safe share rendition');
+  }
+}
+
+async function ensurePublicShareRendition(env: Env, photo: Photo) {
+  if (photo.shareRenditionVersion === SHARE_RENDITION_VERSION) return;
+  await createShareRenditions(env, photo);
+  photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
+  try {
+    await setPhotoMeta(env, photo);
+  } catch (error) {
+    await deleteShareRenditions(env, photo);
+    throw error;
+  }
 }
 async function setIndex(env: Env, photos: (Photo | PhotoIndexItem)[]) {
   const payload = JSON.stringify(photos.map((p) => compactPhotoForIndex(photoFromIndexItem(p as any))));
@@ -605,7 +746,8 @@ function openapi(origin: string) {
       },
       '/api/photos/{id}/file': { get: { summary: 'Stream original media bytes from drive9 (supports Range for video)' } },
       '/api/shares/{token}': { get: { summary: 'Read metadata for one publicly shared media item' } },
-      '/api/shares/{token}/file': { get: { summary: 'Stream one publicly shared media item using an unguessable token' } },
+      '/api/shares/{token}/file': { get: { summary: 'Stream a metadata-stripped public display rendition using an unguessable token' } },
+      '/api/shares/{token}/poster': { get: { summary: 'Read a metadata-stripped JPEG social preview using an unguessable token' } },
       '/api/collections': { get: { summary: 'Smart collections from drive9 metadata' } }
     }
   };
@@ -637,13 +779,31 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const token = sharedFileMatch[1];
       const photo = await findSharedPhoto(env, token);
       if (!photo) return json({ error: 'share not found' }, { status: 404 });
-      return proxyPhotoFile(req, env, photo, 'private, no-store');
+      await ensurePublicShareRendition(env, photo);
+      return proxyPhotoFile(req, env, {
+        ...photo,
+        objectKey: shareDisplayPath(photo),
+        mime: inferMediaKind(photo) === 'video' ? 'video/mp4' : 'image/jpeg',
+      }, 'private, no-store');
+    }
+    const sharedPosterMatch = path.match(/^\/api\/shares\/([^/]+)\/poster$/);
+    if (sharedPosterMatch && req.method === 'GET') {
+      const token = sharedPosterMatch[1];
+      const photo = await findSharedPhoto(env, token);
+      if (!photo) return json({ error: 'share not found' }, { status: 404 });
+      await ensurePublicShareRendition(env, photo);
+      return proxyPhotoFile(req, env, {
+        ...photo,
+        objectKey: sharePosterPath(photo),
+        mime: 'image/jpeg',
+      }, 'private, no-store');
     }
     const sharedMatch = path.match(/^\/api\/shares\/([^/]+)$/);
     if (sharedMatch && req.method === 'GET') {
       const token = sharedMatch[1];
       const photo = await findSharedPhoto(env, token);
       if (!photo) return json({ error: 'share not found' }, { status: 404 });
+      await ensurePublicShareRendition(env, photo);
       return json({ photo: photoForShare(photo, url.origin, token), storage: 'drive9' });
     }
     if (path === '/api/photos' && req.method === 'GET') {
@@ -752,6 +912,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const photos = await getAllPhotos(env);
       const photo = photos.find((candidate) => candidate.id === id && !candidate.archived);
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
+      const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
+      if (needsRendition) await createShareRenditions(env, photo);
       if (!photo.shareToken) {
         const usedTokens = new Set(photos.map((candidate) => candidate.shareToken).filter(Boolean));
         let token = generateShareToken();
@@ -759,7 +921,13 @@ async function handle(req: Request, env: Env): Promise<Response> {
         photo.shareToken = token;
         photo.sharedAt = new Date().toISOString();
         photo.updatedAt = photo.sharedAt;
+      }
+      photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
+      try {
         await setPhotoMeta(env, photo);
+      } catch (error) {
+        if (needsRendition) await deleteShareRenditions(env, photo);
+        throw error;
       }
       return json({
         share: {
@@ -778,8 +946,10 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (photo.shareToken) {
         photo.shareToken = undefined;
         photo.sharedAt = undefined;
+        photo.shareRenditionVersion = undefined;
         photo.updatedAt = new Date().toISOString();
         await setPhotoMeta(env, photo);
+        await deleteShareRenditions(env, photo);
       }
       return new Response(null, { status: 204, headers: cors });
     }
@@ -805,10 +975,12 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (next.archived && !prev.archived) {
         next.shareToken = undefined;
         next.sharedAt = undefined;
+        next.shareRenditionVersion = undefined;
       }
       photos[i] = next;
       await setPhotoMeta(env, next);
       await setIndex(env, photos);
+      if (next.archived && !prev.archived) await deleteShareRenditions(env, prev);
       return json({ photo: photoForManagement(next, url.origin), storage: 'drive9' });
     }
     if (photoMatch && req.method === 'DELETE') {
@@ -818,6 +990,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (found) await d9(env, 'DELETE', found.objectKey);
       await deletePhotoMeta(env, id);
       await setIndex(env, photos.filter((p) => p.id !== id));
+      if (found) await deleteShareRenditions(env, found);
       return new Response(null, { status: 204, headers: cors });
     }
     if (path === '/api/collections' && req.method === 'GET') {
@@ -834,6 +1007,13 @@ async function handle(req: Request, env: Env): Promise<Response> {
     }
     return json({ error: 'not found' }, { status: 404 });
   } catch (e: any) {
+    if (path.startsWith('/api/shares/')) {
+      if (!(e instanceof HttpError)) console.warn('public share request failed', e);
+      return json({
+        error: e instanceof HttpError ? e.message : 'share temporarily unavailable',
+        storage: 'drive9',
+      }, { status: e instanceof HttpError ? e.status : 503 });
+    }
     const status = e instanceof HttpError ? e.status : e instanceof UploadBodySizeError ? 400 : 500;
     return json({ error: e?.message || String(e), storage: 'drive9' }, { status });
   }

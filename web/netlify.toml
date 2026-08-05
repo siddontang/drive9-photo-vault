@@ -2,6 +2,14 @@
   command = "npm run build"
   publish = "dist"
 
+[[edge_functions]]
+  function = "share-meta"
+  path = "/s/*"
+
+[[edge_functions]]
+  function = "share-meta"
+  path = "/share/*"
+
 # HTML/app shell should stay fresh so mobile in-app browsers pick up new bundles.
 [[headers]]
   for = "/*.html"

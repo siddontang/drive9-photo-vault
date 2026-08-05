@@ -129,12 +129,12 @@
 .pending.timeout{background:#fef2f2;color:#991b1b;border-color:#fecaca}
 @media(max-width:420px){.videoThumb{aspect-ratio:4/3}}
 .photo{position:relative}
-.mediaShareButton{position:absolute;top:10px;right:10px;z-index:2;width:42px;height:42px;border:1px solid rgba(255,255,255,.42);border-radius:999px;background:rgba(20,23,31,.52);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 5px 18px rgba(0,0,0,.18);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);transition:transform .16s ease,background .18s ease,box-shadow .18s ease,opacity .18s ease;-webkit-tap-highlight-color:transparent}
-.mediaShareButton:hover{background:rgba(20,23,31,.7);box-shadow:0 7px 22px rgba(0,0,0,.23);transform:translateY(-1px)}
-.mediaShareButton:active{transform:scale(.94)}
-.mediaShareButton.active{background:rgba(0,113,227,.9);border-color:rgba(255,255,255,.5)}
-.mediaShareButton:disabled{opacity:.68;cursor:wait;transform:none}
-.mediaShareButton:focus-visible,.shareClose:focus-visible,.nativeShareButton:focus-visible,.copyShareButton:focus-visible,.revokeShareButton:focus-visible,.revokeConfirmActions button:focus-visible{outline:3px solid rgba(10,132,255,.42);outline-offset:2px}
+.cardActions{display:inline-flex;align-items:center;gap:3px;flex:0 0 auto}
+.cardShareAction{color:#707782!important;background:transparent!important;box-shadow:none!important}
+.cardShareAction:hover{color:#20242b!important;background:#f1f2f4!important}
+.cardShareAction.shared{color:#535a64!important}
+.cardShareAction:disabled{opacity:.45;cursor:wait}
+.cardShareAction:focus-visible,.shareClose:focus-visible,.socialShareAction:focus-visible,.qrClose:focus-visible,.revokeShareButton:focus-visible,.revokeConfirmActions button:focus-visible{outline:3px solid rgba(10,132,255,.42);outline-offset:2px}
 
 .shareOverlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;padding:24px;background:rgba(15,18,25,.42);backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);animation:shareOverlayIn .2s ease both}
 .shareSheet{position:relative;width:min(92vw,440px);max-height:min(90vh,720px);overflow:auto;background:rgba(255,255,255,.96);border:1px solid rgba(255,255,255,.78);border-radius:30px;box-shadow:0 28px 80px rgba(12,18,32,.3),0 2px 8px rgba(12,18,32,.08);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",sans-serif;animation:shareSheetIn .24s cubic-bezier(.2,.8,.2,1) both}
@@ -153,15 +153,26 @@
 .shareAccess>span:last-child{display:grid;gap:2px;min-width:0}
 .shareAccess b{font-size:14px;line-height:1.25}
 .shareAccess small{color:#6e6e73;font-size:12px;line-height:1.35}
-.shareButtons{display:grid;gap:9px}
-.nativeShareButton,.copyShareButton{min-height:48px;width:100%;border:0;border-radius:15px;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 18px;font:inherit;font-size:15px;font-weight:650;cursor:pointer;transition:transform .14s ease,background .18s ease,color .18s ease,box-shadow .18s ease}
-.nativeShareButton,.copyShareButton.primary{background:#0071e3;color:#fff;box-shadow:0 5px 14px rgba(0,113,227,.2)}
-.nativeShareButton:hover,.copyShareButton.primary:hover{background:#0077ed}
-.copyShareButton{background:#ececf0;color:#1d1d1f}
-.copyShareButton:hover{background:#e3e3e8}
-.nativeShareButton:active,.copyShareButton:active{transform:scale(.98)}
-.nativeShareButton:disabled,.copyShareButton:disabled{opacity:.52;cursor:wait;transform:none}
-.copyShareButton.copied{background:#e8f7ed;color:#16713a;box-shadow:none}
+.socialShareBar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:18px 0 4px}
+.socialShareAction{min-width:0;border:0;background:transparent;color:#4c4c50;border-radius:14px;padding:6px 2px 7px;display:grid;justify-items:center;gap:6px;font:inherit;font-size:10px;font-weight:650;cursor:pointer;transition:background .16s ease,transform .14s ease,color .16s ease}
+.socialShareAction:hover{background:#f0f0f3;color:#1d1d1f}
+.socialShareAction:active{transform:scale(.96)}
+.socialShareAction.copied{color:#16713a}
+.socialMark{width:42px;height:42px;border-radius:999px;background:#ededf0;color:#2f3034;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:750;letter-spacing:-.04em}
+.xMark{font-size:16px;font-weight:600}
+.facebookMark{font-family:Arial,sans-serif;font-size:22px;font-weight:700;padding-top:4px}
+.socialShareBar.compact{margin:0;grid-template-columns:repeat(5,58px);flex:0 0 auto;align-self:center}
+.socialShareBar.compact .socialShareAction{color:rgba(255,255,255,.7)}
+.socialShareBar.compact .socialShareAction:hover{background:rgba(255,255,255,.1);color:#fff}
+.socialShareBar.compact .socialMark{width:38px;height:38px;background:rgba(255,255,255,.11);color:#fff;border:1px solid rgba(255,255,255,.08)}
+.qrOverlay{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;background:rgba(4,6,10,.62);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);animation:shareOverlayIn .18s ease both}
+.qrDialog{position:relative;width:min(92vw,328px);padding:28px 28px 24px;border:1px solid rgba(255,255,255,.84);border-radius:28px;background:rgba(255,255,255,.97);box-shadow:0 28px 90px rgba(0,0,0,.38);text-align:center;color:#1d1d1f}
+.qrClose{position:absolute;top:12px;right:12px;width:34px;height:34px;border:0;border-radius:999px;background:#ececf0;color:#515154;display:grid;place-items:center;cursor:pointer}
+.qrCanvas{display:grid;place-items:center;margin:8px auto 18px;padding:10px;border-radius:20px;background:#fff}
+.qrCanvas canvas{display:block;width:100%;height:auto;border-radius:8px}
+.qrDialog h3{margin:0;font-size:20px;letter-spacing:-.025em}
+.qrDialog p{margin:8px 0 0;color:#6e6e73;font-size:13px;line-height:1.45}
+.qrDialog>span{display:block;margin-top:12px;color:#98989d;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .manualShareCopy{display:grid;gap:7px;margin:0 0 12px;color:#6e6e73;font-size:12px;font-weight:600}
 .manualShareCopy input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;border-radius:13px;padding:12px;background:#fff;color:#1d1d1f;border-color:#d2d2d7}
 .revokeShareButton{width:100%;min-height:42px;margin-top:10px;border:0;background:transparent;color:#c9342f;border-radius:13px;display:flex;align-items:center;justify-content:center;gap:7px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;transition:background .16s ease}
@@ -178,24 +189,29 @@
 .shareToast{position:fixed;left:50%;bottom:28px;z-index:100;transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:calc(100vw - 32px);padding:11px 16px;border-radius:999px;background:rgba(29,29,31,.88);color:#fff;box-shadow:0 12px 32px rgba(0,0,0,.24);backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);font-size:13px;font-weight:650;white-space:nowrap;animation:shareToastIn .22s cubic-bezier(.2,.8,.2,1) both}
 .spin{animation:shareSpin .8s linear infinite}
 
-.sharedPage{width:100%;max-width:none;min-height:100vh;padding:22px clamp(18px,4vw,56px) 28px;display:grid;grid-template-rows:auto 1fr auto;background:#f5f5f7;color:#1d1d1f;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",sans-serif}
-.sharedChrome{width:min(100%,1180px);margin:0 auto 24px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+.sharedPage{width:100%;max-width:none;min-height:100vh;padding:18px clamp(18px,3vw,42px) 22px;display:grid;grid-template-rows:auto 1fr auto;background:#08090b;color:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",sans-serif}
+.sharedChrome{width:min(100%,1320px);margin:0 auto 16px;display:flex;align-items:center;justify-content:space-between;gap:18px}
 .sharedWordmark{display:grid;gap:1px}
-.sharedWordmark span{font-size:18px;font-weight:720;letter-spacing:-.025em}
-.sharedWordmark small{color:#86868b;font-size:11px;font-weight:600}
-.sharedChrome .langSwitch{background:rgba(229,229,234,.82)}
-.sharedStage{width:min(100%,1180px);margin:auto;display:grid;align-content:center;justify-items:center;gap:26px}
-.sharedMediaFrame{width:100%;min-height:280px;max-height:74vh;display:grid;place-items:center;overflow:hidden;border:1px solid rgba(0,0,0,.06);border-radius:24px;background:#e9eaed;box-shadow:0 22px 70px rgba(0,0,0,.12)}
-.sharedMediaFrame img,.sharedMediaFrame video{display:block;max-width:100%;width:100%;height:auto;max-height:74vh;object-fit:contain;background:#e9eaed}
-.sharedInfo{width:min(100%,760px);padding:0 4px;text-align:left}
-.sharedInfo h2{margin:0;color:#1d1d1f;font-size:clamp(24px,3vw,38px);line-height:1.08;letter-spacing:-.045em}
-.sharedInfo .sub{margin:8px 0 0;color:#86868b;font-size:12px}
-.sharedCaption{max-width:680px;margin:18px 0 0;color:#424245;font-size:16px;line-height:1.58;white-space:pre-wrap}
-.sharedTags{display:flex;gap:7px;flex-wrap:wrap;margin-top:18px}
-.sharedTags span{background:#e8e8ed;color:#515154;border-radius:999px;padding:7px 11px;font-size:11px;font-weight:650;letter-spacing:.015em;text-transform:lowercase}
+.sharedWordmark span{font-size:16px;font-weight:680;letter-spacing:-.02em;color:rgba(255,255,255,.88)}
+.sharedWordmark small{color:rgba(255,255,255,.4);font-size:10px;font-weight:600}
+.sharedChrome .langSwitch{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.07)}
+.sharedChrome .langSwitch button{color:rgba(255,255,255,.55)}
+.sharedChrome .langSwitch button.on{background:rgba(255,255,255,.14);color:#fff}
+.sharedStage{width:min(100%,1320px);margin:auto;display:grid;align-content:center;justify-items:center}
+.sharedMediaScene{position:relative;width:100%;height:min(78vh,860px);min-height:520px;overflow:hidden;display:grid;grid-template-rows:minmax(0,1fr) auto;gap:14px;padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:28px;background:#111318;box-shadow:0 36px 110px rgba(0,0,0,.5)}
+.sharedBackdrop{position:absolute;inset:-8%;width:116%;height:116%;object-fit:cover;filter:blur(54px) saturate(115%) brightness(.48);opacity:.72;transform:scale(1.04)}
+.sharedMediaFrame{position:relative;z-index:1;min-width:0;min-height:0;overflow:hidden;display:grid;place-items:center;padding:8px;background:radial-gradient(circle at 50% 38%,rgba(255,255,255,.04),rgba(0,0,0,.24) 72%)}
+.sharedMediaFrame img,.sharedMediaFrame video{position:relative;z-index:1;display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;border-radius:8px;box-shadow:0 24px 70px rgba(0,0,0,.34)}
+.sharedInfo{position:relative;z-index:3;display:flex;align-items:flex-end;justify-content:space-between;gap:22px;padding:17px 18px;border:1px solid rgba(255,255,255,.11);border-radius:21px;background:rgba(17,19,24,.68);box-shadow:0 14px 44px rgba(0,0,0,.22);backdrop-filter:blur(26px) saturate(130%);-webkit-backdrop-filter:blur(26px) saturate(130%)}
+.sharedCopy{min-width:0;flex:1}
+.sharedInfo h2{margin:0;color:#fff;font-size:clamp(21px,2.3vw,31px);line-height:1.08;letter-spacing:-.038em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sharedInfo .sub{margin:6px 0 0;color:rgba(255,255,255,.44);font-size:11px}
+.sharedCaption{max-width:650px;margin:10px 0 0;color:rgba(255,255,255,.72);font-size:13px;line-height:1.48;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sharedTags{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;max-height:27px;overflow:hidden}
+.sharedTags span{background:rgba(255,255,255,.09);color:rgba(255,255,255,.66);border-radius:999px;padding:5px 9px;font-size:10px;font-weight:620;letter-spacing:.01em;text-transform:lowercase}
 .sharedUnavailable{min-height:240px;width:min(100%,620px);display:flex;align-items:center;justify-content:center;gap:10px;padding:44px 22px;text-align:center;color:#6e6e73;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);border-radius:24px;box-shadow:0 16px 46px rgba(0,0,0,.08)}
-.sharedPage .footer{margin:32px 0 0;color:#86868b}
-.sharedPage .footer a{color:#515154;font-weight:650}
+.sharedPage .footer{margin:18px 0 0;color:rgba(255,255,255,.28)}
+.sharedPage .footer a{color:rgba(255,255,255,.52);font-weight:650}
 
 @keyframes shareOverlayIn{from{opacity:0}to{opacity:1}}
 @keyframes shareSheetIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
@@ -209,25 +225,14 @@
   .shareSheetEyebrow,.shareAccess small,.revokeConfirm span,.manualShareCopy{color:#a1a1a6}
   .shareAccess{background:#2c2c2e}
   .shareAccessIcon{background:#3a3a3c;color:#0a84ff}
-  .copyShareButton{background:#3a3a3c;color:#f5f5f7}
-  .copyShareButton:hover{background:#48484a}
-  .copyShareButton.copied{background:#153d24;color:#78d994}
+  .socialShareAction{color:#c7c7cc}
+  .socialShareAction:hover{background:#3a3a3c;color:#fff}
+  .socialMark{background:#3a3a3c;color:#f5f5f7}
   .manualShareCopy input{background:#2c2c2e;color:#f5f5f7;border-color:#48484a}
   .revokeShareButton:hover{background:#3b2928}
   .revokeConfirm{background:#3b2928;border-color:#633632}
   .revokeConfirmActions button{background:#48484a;color:#f5f5f7}
-  .sharedPage{background:#161617;color:#f5f5f7}
-  .sharedWordmark small,.sharedInfo .sub,.sharedPage .footer{color:#98989d}
-  .sharedChrome .langSwitch{background:#2c2c2e;border-color:rgba(255,255,255,.06)}
-  .sharedChrome .langSwitch button{color:#a1a1a6}
-  .sharedChrome .langSwitch button.on{background:#48484a;color:#fff}
-  .sharedMediaFrame,.sharedMediaFrame img,.sharedMediaFrame video{background:#232325;border-color:rgba(255,255,255,.08)}
-  .sharedMediaFrame{box-shadow:0 24px 80px rgba(0,0,0,.38)}
-  .sharedInfo h2{color:#f5f5f7}
-  .sharedCaption{color:#d1d1d6}
-  .sharedTags span{background:#2c2c2e;color:#c7c7cc}
   .sharedUnavailable{background:rgba(44,44,46,.7);color:#a1a1a6;border-color:rgba(255,255,255,.08);box-shadow:0 18px 54px rgba(0,0,0,.3)}
-  .sharedPage .footer a{color:#d1d1d6}
 }
 
 @media(max-width:640px){
@@ -238,20 +243,23 @@
   .sharePreview{height:180px;border-radius:27px 27px 0 0}
   .shareSheetBody{padding:20px 20px calc(24px + env(safe-area-inset-bottom))}
   .shareToast{bottom:calc(18px + env(safe-area-inset-bottom))}
-  .sharedPage{padding:18px 14px 22px}
-  .sharedChrome{margin-bottom:18px}
+  .socialShareBar{grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+  .socialShareBar.compact{width:100%;grid-template-columns:repeat(5,minmax(0,1fr))}
+  .sharedPage{padding:14px 10px 18px}
+  .sharedChrome{margin-bottom:12px;padding:0 4px}
   .sharedWordmark small{display:none}
-  .sharedStage{gap:22px}
-  .sharedMediaFrame{min-height:220px;max-height:68vh;border-radius:19px}
-  .sharedMediaFrame img,.sharedMediaFrame video{max-height:68vh}
-  .sharedInfo{padding:0 4px}
-  .sharedInfo h2{font-size:26px}
-  .sharedCaption{font-size:15px;margin-top:15px}
+  .sharedMediaScene{height:calc(100vh - 112px);min-height:520px;gap:9px;padding:9px;border-radius:21px}
+  .sharedMediaFrame{padding:0}
+  .sharedMediaFrame img,.sharedMediaFrame video{max-width:100%;border-radius:6px}
+  .sharedInfo{display:block;padding:15px 14px 12px;border-radius:18px}
+  .sharedInfo h2{font-size:21px}
+  .sharedCaption{-webkit-line-clamp:2}
+  .sharedInfo .socialShareBar{margin-top:12px}
   .sharedPage .footer{margin-top:26px}
   @keyframes shareSheetMobileIn{from{opacity:0;transform:translateY(42px)}to{opacity:1;transform:none}}
 }
 
 @media(prefers-reduced-motion:reduce){
   .shareOverlay,.shareSheet,.shareToast{animation:none}
-  .mediaShareButton,.shareClose,.nativeShareButton,.copyShareButton{transition:none}
+  .cardShareAction,.shareClose,.socialShareAction{transition:none}
 }
