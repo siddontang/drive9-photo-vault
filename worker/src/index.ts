@@ -974,6 +974,21 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const item = items.find((candidate) => candidate.id === id && !candidate.archived);
       const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
       if (!photo || photo.archived) return json({ error: 'photo not found' }, { status: 404 });
+      if (
+        photo.shareToken
+        && photo.shareRenditionVersion === SHARE_RENDITION_VERSION
+        && item?.shareToken === photo.shareToken
+        && item.shareRenditionVersion === SHARE_RENDITION_VERSION
+      ) {
+        return json({
+          share: {
+            token: photo.shareToken,
+            url: `${url.origin}/api/shares/${photo.shareToken}`,
+            sharedAt: photo.sharedAt,
+          },
+          storage: 'drive9',
+        });
+      }
       const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
       if (needsRendition) await createShareRenditions(env, photo);
       if (!photo.shareToken) {

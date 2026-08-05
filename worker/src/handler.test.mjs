@@ -781,8 +781,16 @@ test('POST /api/photos/:id/share creates an unguessable share without leaking in
   assert.match(created.share.token, /^[A-Za-z0-9_-]{32}$/);
   assert.equal(created.share.url, `http://localhost/api/shares/${created.share.token}`);
 
+  workerSubrequestCount = 0;
+  workerDrive9Requests = [];
   const second = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
   assert.equal((await second.json()).share.token, created.share.token, 'the current link should be reused');
+  assert.equal(workerSubrequestCount, 2, 'an unchanged share should only read the index and authoritative metadata');
+  assert.deepEqual(workerDrive9Requests, [
+    { method: 'GET', path: '/photovault/index.json.gz' },
+    { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
+  ]);
+  assert.equal(imageTransformCalls.length, 2, 'an unchanged share must reuse the existing rendition');
 
   const list = await handler(new Request('http://localhost/api/photos'), env);
   const listed = (await list.json()).photos.find((candidate) => candidate.id === photo.id);

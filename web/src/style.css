@@ -153,6 +153,11 @@
 .shareAccess>span:last-child{display:grid;gap:2px;min-width:0}
 .shareAccess b{font-size:14px;line-height:1.25}
 .shareAccess small{color:#6e6e73;font-size:12px;line-height:1.35}
+.sharePreparing{display:flex;align-items:center;gap:13px;margin:18px 0;padding:16px;background:#f4f4f6;border-radius:16px;color:#1d1d1f}
+.sharePreparing>svg{flex:0 0 auto;color:#0071e3}
+.sharePreparing>span{display:grid;gap:4px}
+.sharePreparing b{font-size:14px;line-height:1.3}
+.sharePreparing small{color:#6e6e73;font-size:12px;line-height:1.45}
 .socialShareBar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:18px 0 4px}
 .socialShareAction{min-width:0;border:0;background:transparent;color:#4c4c50;border-radius:14px;padding:6px 2px 7px;display:grid;justify-items:center;gap:6px;font:inherit;font-size:10px;font-weight:650;cursor:pointer;transition:background .16s ease,transform .14s ease,color .16s ease}
 .socialShareAction:hover{background:#f0f0f3;color:#1d1d1f}
@@ -221,9 +226,9 @@
 @media(prefers-color-scheme:dark){
   .shareOverlay{background:rgba(0,0,0,.58)}
   .shareSheet{background:rgba(34,34,36,.97);border-color:rgba(255,255,255,.12);box-shadow:0 30px 88px rgba(0,0,0,.58)}
-  .shareSheet h2,.shareAccess,.revokeConfirm{color:#f5f5f7}
-  .shareSheetEyebrow,.shareAccess small,.revokeConfirm span,.manualShareCopy{color:#a1a1a6}
-  .shareAccess{background:#2c2c2e}
+  .shareSheet h2,.shareAccess,.sharePreparing,.revokeConfirm{color:#f5f5f7}
+  .shareSheetEyebrow,.shareAccess small,.sharePreparing small,.revokeConfirm span,.manualShareCopy{color:#a1a1a6}
+  .shareAccess,.sharePreparing{background:#2c2c2e}
   .shareAccessIcon{background:#3a3a3c;color:#0a84ff}
   .socialShareAction{color:#c7c7cc}
   .socialShareAction:hover{background:#3a3a3c;color:#fff}
