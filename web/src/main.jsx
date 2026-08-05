@@ -144,8 +144,10 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
     };
   }, []);
 
+  const preparing = busy && !link;
+
   return <div className="shareOverlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section ref={sheetRef} className="shareSheet" role="dialog" aria-modal="true" aria-labelledby="shareSheetTitle" aria-describedby="shareAccessBody" tabIndex={-1}>
+    <section ref={sheetRef} className="shareSheet" role="dialog" aria-modal="true" aria-labelledby="shareSheetTitle" aria-describedby={preparing ? 'sharePreparingBody' : 'shareAccessBody'} tabIndex={-1}>
       <div className="shareSheetHandle" />
       <button className="shareClose" type="button" onClick={onClose} aria-label={t.close}><X size={18} /></button>
       <div className="sharePreview">
@@ -154,6 +156,10 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
       <div className="shareSheetBody">
         <div className="shareSheetEyebrow">{t.share}</div>
         <h2 id="shareSheetTitle">{photo.title}</h2>
+        {preparing ? <div className="sharePreparing" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={24} />
+          <span><b>{t.sharePreparingTitle}</b><small id="sharePreparingBody">{t.sharePreparingBody}</small></span>
+        </div> : <>
         <div className="shareAccess">
           <span className="shareAccessIcon"><Globe2 size={18} /></span>
           <span><b>{t.shareAccessTitle}</b><small id="shareAccessBody">{t.shareAccessBody}</small></span>
@@ -182,6 +188,7 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
             </div>
           </div>
         )}
+        </>}
       </div>
     </section>
   </div>;
@@ -310,6 +317,8 @@ function App() {
   const [manualShareCopy, setManualShareCopy] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [toast, setToast] = useState('');
+  const dismissedShareRequest = useRef(null);
+  const shareRequestSequence = useRef(0);
   const photoLoadGate = useRef(null);
   if (photoLoadGate.current === null) photoLoadGate.current = createLatestRequestGate(q, tag);
   photoLoadGate.current.setSearch(q, tag);
@@ -471,22 +480,46 @@ function App() {
     await load();
   }
   async function sharePhoto(photo) {
+    if (shareBusyId) return;
+    if (photo.shareLink) {
+      setShareCopied(false);
+      setManualShareCopy(false);
+      setConfirmRevoke(false);
+      setShareSheet({ photo, link: photo.shareLink });
+      return;
+    }
+    const requestId = ++shareRequestSequence.current;
+    dismissedShareRequest.current = null;
     setShareBusyId(photo.id);
+    setShareSheet({ photo, link: '', requestId });
     setError('');
     try {
       const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'POST' });
       const payload = await readShareResponse(response);
       const link = sharePageUrl(window.location.origin, payload.share.token);
-      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true } : item));
+      const sharedPhoto = { ...photo, shared: true, shareLink: link };
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true, shareLink: link } : item));
       setShareCopied(false);
       setManualShareCopy(false);
       setConfirmRevoke(false);
-      setShareSheet({ photo: { ...photo, shared: true }, link });
+      if (dismissedShareRequest.current === requestId) setToast(t.shareReady);
+      else setShareSheet({ photo: sharedPhoto, link });
     } catch (reason) {
       setError(t.shareFailed(reason?.message || reason));
+      setShareSheet((current) => current?.requestId === requestId ? null : current);
     } finally {
       setShareBusyId(null);
     }
+  }
+  function closeShareSheet() {
+    if (!shareSheet) return;
+    if (shareSheet.requestId && shareBusyId === shareSheet.photo.id) {
+      dismissedShareRequest.current = shareSheet.requestId;
+    }
+    setShareSheet(null);
+    setShareCopied(false);
+    setConfirmRevoke(false);
+    setManualShareCopy(false);
   }
   async function copyShareLink() {
     if (!shareSheet) return;
@@ -518,7 +551,7 @@ function App() {
     try {
       const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'DELETE' });
       if (!response.ok) throw new Error(await response.text());
-      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: false } : item));
+      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: false, shareLink: undefined } : item));
       setShareSheet(null);
       setConfirmRevoke(false);
       setToast(t.shareRevoked);
@@ -609,7 +642,7 @@ function App() {
               <button
                 className={p.shared ? 'icon cardShareAction shared' : 'icon cardShareAction'}
                 type="button"
-                disabled={shareBusyId === p.id}
+                disabled={Boolean(shareBusyId)}
                 onClick={() => sharePhoto(p)}
                 aria-label={p.shared ? t.manageShare : t.share}
                 aria-pressed={p.shared}
@@ -673,7 +706,7 @@ function App() {
         confirmRevoke={confirmRevoke}
         canNativeShare={typeof navigator.share === 'function'}
         t={t}
-        onClose={() => { if (!shareBusyId) { setShareSheet(null); setShareCopied(false); setConfirmRevoke(false); setManualShareCopy(false); } }}
+        onClose={closeShareSheet}
         onNativeShare={nativeShareLink}
         onCopy={copyShareLink}
         onRevoke={() => unsharePhoto(shareSheet.photo)}

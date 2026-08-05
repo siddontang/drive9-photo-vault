@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fmtBytes, fmtDate, pickLangField, pickLangTags } from './i18n.js';
+import { COPY, fmtBytes, fmtDate, pickLangField, pickLangTags } from './i18n.js';
 
 test('fmtBytes formats bytes / KB / MB with sensible thresholds', () => {
   assert.equal(fmtBytes(0), '0 B');
@@ -12,6 +12,14 @@ test('fmtBytes formats bytes / KB / MB with sensible thresholds', () => {
 
 test('fmtBytes treats undefined as 0', () => {
   assert.equal(fmtBytes(undefined), '0 B');
+});
+
+test('share preparation feedback is available in both languages', () => {
+  for (const lang of ['en', 'zh']) {
+    assert.ok(COPY[lang].sharePreparingTitle);
+    assert.ok(COPY[lang].sharePreparingBody);
+    assert.ok(COPY[lang].shareReady);
+  }
 });
 
 test('fmtDate returns an empty string for missing or invalid input', () => {
