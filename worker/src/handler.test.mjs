@@ -871,8 +871,8 @@ test('share creation and public reads use bounded Drive9 requests for a large ga
     { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
     { method: 'GET', path: photo.objectKey },
     { method: 'PUT', path: `/photovault/share-renditions/${photo.id}.jpg` },
-    { method: 'PUT', path: `/photovault/meta/${photo.id}.json` },
     { method: 'PUT', path: indexPath },
+    { method: 'PUT', path: `/photovault/meta/${photo.id}.json` },
   ]);
 
   workerSubrequestCount = 0;
@@ -895,6 +895,42 @@ test('share creation and public reads use bounded Drive9 requests for a large ga
     { method: 'GET', path: `/photovault/meta/${photo.id}.json` },
     { method: 'GET', path: `/photovault/share-renditions/${photo.id}.jpg` },
   ]);
+});
+
+test('share index write failure leaves metadata unpublished so retry rebuilds the rendition', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('retry.jpg', 'image/jpeg', new Uint8Array([4, 5, 6]));
+  failDrive9PutPath = '/photovault/index.json.gz';
+
+  const failed = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(failed.status, 500);
+  const failedMeta = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(failedMeta.shareToken, undefined);
+  assert.equal(failedMeta.shareRenditionVersion, undefined);
+  assert.equal(drive9Store.has(`/photovault/share-renditions/${photo.id}.jpg`), false);
+
+  failDrive9PutPath = null;
+  const retried = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(retried.status, 200);
+  const { share } = await retried.json();
+  assert.equal(imageTransformCalls.length, 4, 'retry must run both privacy-safe image passes again');
+  const file = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(file.status, 200);
+  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), SAFE_IMAGE_RENDITION);
+});
+
+test('share creation rejects an archived authoritative photo behind a stale active index item', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('archived-race.jpg', 'image/jpeg', new Uint8Array([7, 8, 9]));
+  updatePhotoMeta(photo, { archived: true });
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 404);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.equal(stored.shareToken, undefined);
+  assert.equal(stored.shareRenditionVersion, undefined);
+  assert.equal(drive9Store.has(`/photovault/share-renditions/${photo.id}.jpg`), false);
+  assert.deepEqual(imageTransformCalls, []);
 });
 
 test('image sharing strips non-location EXIF copyright metadata through a metadata-free intermediate', async () => {

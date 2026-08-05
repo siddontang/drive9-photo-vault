@@ -972,8 +972,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const id = shareActionMatch[1];
       const items = await getIndexItems(env);
       const item = items.find((candidate) => candidate.id === id && !candidate.archived);
-      const photo = item ? await getPhotoMeta(env, item) : null;
-      if (!photo) return json({ error: 'photo not found' }, { status: 404 });
+      const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
+      if (!photo || photo.archived) return json({ error: 'photo not found' }, { status: 404 });
       const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
       if (needsRendition) await createShareRenditions(env, photo);
       if (!photo.shareToken) {
@@ -986,8 +986,8 @@ async function handle(req: Request, env: Env): Promise<Response> {
       }
       photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
       try {
-        await setPhotoMeta(env, photo);
         await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
+        await setPhotoMeta(env, photo);
       } catch (error) {
         if (needsRendition) await deleteShareRenditions(env, photo);
         throw error;
@@ -1005,7 +1005,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const id = shareActionMatch[1];
       const items = await getIndexItems(env);
       const item = items.find((candidate) => candidate.id === id);
-      const photo = item ? await getPhotoMeta(env, item) : null;
+      const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
       if (photo.shareToken) {
         photo.shareToken = undefined;
