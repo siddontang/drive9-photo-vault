@@ -1,5 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+class NodeDigestStream extends WritableStream {
+  constructor(algorithm) {
+    const hash = createHash(algorithm.replace('-', '').toLowerCase());
+    let resolveDigest;
+    let rejectDigest;
+    const digest = new Promise((resolve, reject) => {
+      resolveDigest = resolve;
+      rejectDigest = reject;
+    });
+    super({
+      write(chunk) {
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        hash.update(bytes);
+      },
+      close() {
+        const bytes = hash.digest();
+        resolveDigest(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      },
+      abort(reason) { rejectDigest(reason); },
+    });
+    this.digest = digest;
+  }
+}
+
+Object.defineProperty(globalThis.crypto, 'DigestStream', { configurable: true, value: NodeDigestStream });
 
 // Mock Drive9 backend via globalThis.fetch interception.
 // Stores files and index as raw bytes, handles gzip for index.
@@ -10,6 +37,21 @@ let lastDrive9SearchURL = null;
 // Per-path override for the ?stat=1 response. Default (no override) is the
 // production-realistic "not analyzed yet" stat: an empty semantic_text field.
 const drive9StatOverride = new Map();  // fsPath → stat JSON object
+const MULTIPART_PART_SIZE = 8 * 1024 * 1024;
+const multipartSessions = new Map();
+let uploadSequence = 0;
+let multipartAbortCount = 0;
+let multipartCompleteCount = 0;
+let maxMultipartPartBytes = 0;
+let failMultipartPartNumber = null;
+let failDrive9PutPath = null;
+
+async function bodyBytes(body) {
+  if (body instanceof Uint8Array) return body;
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (body && typeof body.arrayBuffer === 'function') return new Uint8Array(await body.arrayBuffer());
+  return new Uint8Array();
+}
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
@@ -20,7 +62,65 @@ globalThis.fetch = async (url, opts = {}) => {
   const fsMatch = u.match(/\/v1\/fs(\/.*?)(?:\?.*)?$/);
   const fsPath = fsMatch ? fsMatch[1] : null;
 
+  if (method === 'POST' && parsedURL.pathname === '/v2/uploads/initiate') {
+    const request = JSON.parse(String(opts.body));
+    const uploadID = `upload-${++uploadSequence}`;
+    const totalParts = Math.ceil(request.total_size / MULTIPART_PART_SIZE);
+    multipartSessions.set(uploadID, { path: request.path, totalSize: request.total_size, parts: new Map() });
+    return new Response(JSON.stringify({ upload_id: uploadID, part_size: MULTIPART_PART_SIZE, total_parts: totalParts }), { status: 200 });
+  }
+
+  const presignMatch = parsedURL.pathname.match(/^\/v2\/uploads\/([^/]+)\/presign-batch$/);
+  if (method === 'POST' && presignMatch) {
+    const uploadID = presignMatch[1];
+    const session = multipartSessions.get(uploadID);
+    if (!session) return new Response('missing upload', { status: 404 });
+    const request = JSON.parse(String(opts.body));
+    const parts = request.parts.map(({ part_number: number }) => ({
+      number,
+      url: `http://upload.local/${uploadID}/${number}`,
+      size: Math.min(MULTIPART_PART_SIZE, session.totalSize - (number - 1) * MULTIPART_PART_SIZE),
+    }));
+    return new Response(JSON.stringify({ parts }), { status: 200 });
+  }
+
+  const uploadedPartMatch = parsedURL.hostname === 'upload.local' && parsedURL.pathname.match(/^\/([^/]+)\/(\d+)$/);
+  if (method === 'PUT' && uploadedPartMatch) {
+    const uploadID = uploadedPartMatch[1];
+    const partNumber = Number(uploadedPartMatch[2]);
+    if (partNumber === failMultipartPartNumber) return new Response('part failed', { status: 503 });
+    const session = multipartSessions.get(uploadID);
+    if (!session) return new Response('missing upload', { status: 404 });
+    const bytes = await bodyBytes(opts.body);
+    maxMultipartPartBytes = Math.max(maxMultipartPartBytes, bytes.byteLength);
+    session.parts.set(partNumber, bytes.byteLength);
+    return new Response('', { status: 200, headers: { etag: `etag-${partNumber}` } });
+  }
+
+  const completeMatch = parsedURL.pathname.match(/^\/v2\/uploads\/([^/]+)\/complete$/);
+  if (method === 'POST' && completeMatch) {
+    const uploadID = completeMatch[1];
+    const session = multipartSessions.get(uploadID);
+    if (!session) return new Response('missing upload', { status: 404 });
+    const receivedBytes = [...session.parts.values()].reduce((sum, size) => sum + size, 0);
+    if (receivedBytes !== session.totalSize) return new Response('incomplete upload', { status: 400 });
+    multipartCompleteCount++;
+    drive9Store.set(session.path, `multipart:${session.totalSize}`);
+    multipartSessions.delete(uploadID);
+    return new Response('', { status: 200 });
+  }
+
+  const abortMatch = parsedURL.pathname.match(/^\/v2\/uploads\/([^/]+)\/abort$/);
+  if (method === 'POST' && abortMatch) {
+    multipartAbortCount++;
+    multipartSessions.delete(abortMatch[1]);
+    return new Response(null, { status: 204 });
+  }
+
   if (method === 'PUT' && fsPath) {
+    if (failDrive9PutPath && (fsPath === failDrive9PutPath || (failDrive9PutPath.endsWith('/') && fsPath.startsWith(failDrive9PutPath)))) {
+      return new Response('forced write failure', { status: 503 });
+    }
     // Store whatever body is sent (gzipped index, JSON meta, raw file bytes)
     const body = opts.body;
     let stored;
@@ -109,6 +209,13 @@ function resetState() {
   drive9SearchStatus = 200;
   lastDrive9SearchURL = null;
   drive9StatOverride.clear();
+  multipartSessions.clear();
+  uploadSequence = 0;
+  multipartAbortCount = 0;
+  multipartCompleteCount = 0;
+  maxMultipartPartBytes = 0;
+  failMultipartPartNumber = null;
+  failDrive9PutPath = null;
 }
 
 // The objectKey a POST /api/photos upload maps to on Drive9. The worker stores
@@ -125,7 +232,47 @@ function drive9ObjectPath(photoId) {
 async function uploadFile(name, type, data) {
   const form = new FormData();
   form.append('file', new File([data], name, { type }));
-  const req = new Request('http://localhost/api/photos', { method: 'POST', body: form });
+  const probe = new Request('http://localhost/api/photos', { method: 'POST', body: form });
+  const encoded = await probe.arrayBuffer();
+  const req = new Request('http://localhost/api/photos', {
+    method: 'POST',
+    headers: { 'content-type': probe.headers.get('content-type'), 'content-length': String(encoded.byteLength) },
+    body: encoded,
+  });
+  const res = await handler(req, env);
+  return { status: res.status, body: await res.json() };
+}
+
+function repeatedByteStream(size, chunkSize = 256 * 1024, extraBytes = 0, counters = {}) {
+  let remaining = size + extraBytes;
+  return new ReadableStream({
+    pull(controller) {
+      counters.pulls = (counters.pulls || 0) + 1;
+      if (remaining === 0) return controller.close();
+      const length = Math.min(chunkSize, remaining);
+      controller.enqueue(new Uint8Array(length));
+      remaining -= length;
+    },
+  }, { highWaterMark: 0 });
+}
+
+async function uploadStream({ name, type, size, stream = repeatedByteStream(size), metadata = {}, contentLength = size, counters = null }) {
+  const headers = {
+    'content-type': type,
+    'x-photovault-upload-metadata': encodeURIComponent(JSON.stringify({
+      name,
+      size,
+      owner: 'stream-owner',
+      title: name.replace(/\.[^.]+$/, ''),
+      tags: 'streamed',
+      note: '',
+      album: 'Inbox',
+      ...metadata,
+    })),
+  };
+  if (contentLength !== null) headers['content-length'] = String(contentLength);
+  const req = new Request('http://localhost/api/photos', { method: 'POST', headers, body: stream, duplex: 'half' });
+  if (counters) counters.pullsBeforeHandler = counters.pulls || 0;
   const res = await handler(req, env);
   return { status: res.status, body: await res.json() };
 }
@@ -180,6 +327,166 @@ test('POST /api/photos rejects video exceeding 25MB with 413 and writes nothing'
   // No Drive9 object, meta, or index writes should have occurred
   const storeKeysAfter = [...drive9Store.keys()];
   assert.deepEqual(storeKeysAfter, storeKeysBefore, 'no Drive9 writes should happen for oversized upload');
+});
+
+test('POST /api/photos rejects oversized legacy multipart before parsing its body', async () => {
+  resetState();
+  const counters = {};
+  const stream = repeatedByteStream(1024, 1024, 0, counters);
+  const req = new Request('http://localhost/api/photos', {
+    method: 'POST',
+    headers: {
+      'content-type': 'multipart/form-data; boundary=test',
+      'content-length': String(26 * 1024 * 1024 + 1),
+    },
+    body: stream,
+    duplex: 'half',
+  });
+  const pullsBeforeHandler = counters.pulls || 0;
+  const res = await handler(req, env);
+  const body = await res.json();
+
+  assert.equal(res.status, 413);
+  assert.match(body.error, /legacy multipart upload limit/);
+  assert.equal(counters.pulls || 0, pullsBeforeHandler);
+  assert.equal(drive9Store.size, 0);
+});
+
+test('POST /api/photos streams an exact 40,000,000-byte video in bounded Drive9 parts', async () => {
+  resetState();
+  const size = 40_000_000;
+  const { status, body } = await uploadStream({ name: 'large.mp4', type: 'video/mp4', size });
+
+  assert.equal(status, 201);
+  assert.equal(body.photo.size, size);
+  assert.equal(body.photo.mediaKind, 'video');
+  assert.equal(multipartCompleteCount, 1);
+  assert.equal(multipartAbortCount, 0);
+  assert.equal(multipartSessions.size, 0);
+  assert.ok(maxMultipartPartBytes <= MULTIPART_PART_SIZE, `largest part was ${maxMultipartPartBytes}`);
+
+  const expected = createHash('sha256');
+  const zeroChunk = new Uint8Array(1024 * 1024);
+  for (let remaining = size; remaining > 0; remaining -= zeroChunk.byteLength) {
+    expected.update(zeroChunk.subarray(0, Math.min(zeroChunk.byteLength, remaining)));
+  }
+  assert.equal(body.photo.checksum, expected.digest('hex'));
+  assert.equal(drive9Store.get(body.photo.objectKey), `multipart:${size}`);
+});
+
+test('POST /api/photos rejects 40,000,001 declared video bytes before reading or writing', async () => {
+  resetState();
+  const counters = {};
+  const size = 40_000_001;
+  const { status, body } = await uploadStream({
+    name: 'too-large.mp4',
+    type: 'video/mp4',
+    size,
+    stream: repeatedByteStream(size, 256 * 1024, 0, counters),
+    counters,
+  });
+
+  assert.equal(status, 413);
+  assert.match(body.error, /40MB/);
+  assert.equal(counters.pulls || 0, counters.pullsBeforeHandler, 'handler must reject before consuming the body stream');
+  assert.equal(multipartSessions.size, 0);
+  assert.equal(drive9Store.size, 0);
+});
+
+test('POST /api/photos keeps the streaming image limit at 25MiB', async () => {
+  resetState();
+  const counters = {};
+  const size = 25 * 1024 * 1024 + 1;
+  const { status, body } = await uploadStream({
+    name: 'too-large.jpg',
+    type: 'image/jpeg',
+    size,
+    stream: repeatedByteStream(size, 64 * 1024, 0, counters),
+    counters,
+  });
+
+  assert.equal(status, 413);
+  assert.match(body.error, /25MiB/);
+  assert.equal(counters.pulls || 0, counters.pullsBeforeHandler, 'handler must reject before consuming the body stream');
+  assert.equal(drive9Store.size, 0);
+});
+
+test('POST /api/photos rejects a content-length mismatch before reading the raw body', async () => {
+  resetState();
+  const counters = {};
+  const declaredSize = 10_000_000;
+  const { status, body } = await uploadStream({
+    name: 'mismatch.mp4',
+    type: 'video/mp4',
+    size: declaredSize,
+    contentLength: declaredSize - 1,
+    stream: repeatedByteStream(declaredSize, 64 * 1024, 0, counters),
+    counters,
+  });
+
+  assert.equal(status, 400);
+  assert.match(body.error, /content-length does not match/);
+  assert.equal(counters.pulls || 0, counters.pullsBeforeHandler);
+  assert.equal(drive9Store.size, 0);
+});
+
+test('POST /api/photos aborts multipart state after a part upload failure', async () => {
+  resetState();
+  failMultipartPartNumber = 2;
+  const { status, body } = await uploadStream({ name: 'failed.mp4', type: 'video/mp4', size: 20_000_000 });
+
+  assert.equal(status, 500);
+  assert.match(body.error, /part 2 upload failed/);
+  assert.equal(multipartAbortCount, 1);
+  assert.equal(multipartCompleteCount, 0);
+  assert.equal(multipartSessions.size, 0);
+  assert.equal(drive9Store.size, 0);
+});
+
+test('POST /api/photos aborts when the raw body is shorter or longer than declared', async (t) => {
+  for (const scenario of [
+    { name: 'short', streamSize: 9_000_000, extraBytes: 0, pattern: /ended early/ },
+    { name: 'extra', streamSize: 10_000_000, extraBytes: 1, pattern: /exceeds the declared/ },
+  ]) {
+    await t.test(scenario.name, async () => {
+      resetState();
+      const declaredSize = 10_000_000;
+      const stream = repeatedByteStream(scenario.streamSize, 128 * 1024, scenario.extraBytes);
+      const { status, body } = await uploadStream({ name: `${scenario.name}.mp4`, type: 'video/mp4', size: declaredSize, stream });
+      assert.equal(status, 400);
+      assert.match(body.error, scenario.pattern);
+      assert.equal(multipartAbortCount, 1);
+      assert.equal(multipartCompleteCount, 0);
+      assert.equal(multipartSessions.size, 0);
+      assert.equal(drive9Store.size, 0);
+    });
+  }
+});
+
+test('POST /api/photos removes a completed object and metadata when index persistence fails', async () => {
+  resetState();
+  failDrive9PutPath = '/photovault/index.json.gz';
+  const { status, body } = await uploadStream({ name: 'rollback.mp4', type: 'video/mp4', size: 10_000_000 });
+
+  assert.equal(status, 500);
+  assert.match(body.error, /drive9 write \/photovault\/index.json.gz failed/);
+  assert.equal(multipartCompleteCount, 1);
+  assert.equal([...drive9Store.keys()].some((key) => key.startsWith('/photovault/photos/')), false);
+  assert.equal([...drive9Store.keys()].some((key) => key.startsWith('/photovault/meta/')), false);
+  assert.equal(drive9Store.has('/photovault/index.json.gz'), false);
+});
+
+test('POST /api/photos removes a completed object when metadata persistence fails', async () => {
+  resetState();
+  failDrive9PutPath = '/photovault/meta/';
+  const { status, body } = await uploadStream({ name: 'rollback-meta.mp4', type: 'video/mp4', size: 10_000_000 });
+
+  assert.equal(status, 500);
+  assert.match(body.error, /drive9 write \/photovault\/meta\//);
+  assert.equal(multipartCompleteCount, 1);
+  assert.equal([...drive9Store.keys()].some((key) => key.startsWith('/photovault/photos/')), false);
+  assert.equal([...drive9Store.keys()].some((key) => key.startsWith('/photovault/meta/')), false);
+  assert.equal(drive9Store.has('/photovault/index.json.gz'), false);
 });
 
 test('POST /api/photos accepts image upload with mediaKind=image', async () => {

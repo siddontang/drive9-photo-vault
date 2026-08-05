@@ -121,7 +121,7 @@ test('inferMediaKind defaults to image when mediaKind is absent and MIME is not 
 
 // -- size limits --
 
-test('size limits are 25MB', () => {
-  assert.equal(VIDEO_SIZE_LIMIT, 25 * 1024 * 1024);
+test('video uses decimal 40MB while images stay at 25MiB', () => {
+  assert.equal(VIDEO_SIZE_LIMIT, 40_000_000);
   assert.equal(IMAGE_SIZE_LIMIT, 25 * 1024 * 1024);
 });
