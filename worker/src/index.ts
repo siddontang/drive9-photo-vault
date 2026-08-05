@@ -59,6 +59,9 @@ type PhotoIndexItem = {
   aiCaptionEn?: string;
   aiCaptionZh?: string;
   analysisStatus?: string;
+  shareToken?: string;
+  sharedAt?: string;
+  shareRenditionVersion?: number;
 };
 
 type Drive9SearchResult = {
@@ -347,6 +350,9 @@ function photoFromIndexItem(x: PhotoIndexItem | Photo): Photo {
     aiTagsEn: (x as Photo).aiTagsEn || [],
     aiTagsZh: (x as Photo).aiTagsZh || [],
     analysisStatus: x.analysisStatus || (x as Photo).analysisStatus,
+    shareToken: x.shareToken,
+    sharedAt: x.sharedAt,
+    shareRenditionVersion: x.shareRenditionVersion,
   };
 }
 async function getIndexItems(env: Env): Promise<PhotoIndexItem[]> {
@@ -366,6 +372,12 @@ async function getPhotoMeta(env: Env, item: PhotoIndexItem): Promise<Photo> {
   const res = await d9(env, 'GET', metaPath(item.id));
   if (res.ok) return compactPhotoMeta(await res.json() as Photo);
   return photoFromIndexItem(item);
+}
+async function getAuthoritativePhotoMeta(env: Env, item: PhotoIndexItem): Promise<Photo | null> {
+  const res = await d9(env, 'GET', metaPath(item.id));
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`drive9 read ${metaPath(item.id)} failed: ${res.status} ${await res.text()}`);
+  return compactPhotoMeta(await res.json() as Photo);
 }
 async function getAllPhotos(env: Env): Promise<Photo[]> {
   const items = await getIndexItems(env);
@@ -390,6 +402,9 @@ function compactPhotoForIndex(p: Photo): PhotoIndexItem {
     aiCaptionEn: (p.aiCaptionEn || '').slice(0, 140),
     aiCaptionZh: (p.aiCaptionZh || '').slice(0, 140),
     analysisStatus: p.analysisStatus,
+    shareToken: p.shareToken,
+    sharedAt: p.sharedAt,
+    shareRenditionVersion: p.shareRenditionVersion,
   };
 }
 function compactPhotoMeta(p: Photo): Photo {
@@ -438,7 +453,13 @@ function photoForShare(p: Photo, origin: string, token: string) {
 }
 async function findSharedPhoto(env: Env, token: string) {
   if (!SHARE_TOKEN_PATTERN.test(token)) return null;
-  return (await getAllPhotos(env)).find((p) => p.shareToken === token && !p.archived) || null;
+  const items = await getIndexItems(env);
+  const indexed = items.find((item) => item.shareToken === token && !item.archived);
+  if (indexed) {
+    const photo = await getAuthoritativePhotoMeta(env, indexed);
+    return photo && photo.shareToken === token && !photo.archived ? photo : null;
+  }
+  return null;
 }
 
 function shareDisplayPath(photo: Photo) {
@@ -949,13 +970,14 @@ async function handle(req: Request, env: Env): Promise<Response> {
     const shareActionMatch = path.match(/^\/api\/photos\/([^/]+)\/share$/);
     if (shareActionMatch && req.method === 'POST') {
       const id = shareActionMatch[1];
-      const photos = await getAllPhotos(env);
-      const photo = photos.find((candidate) => candidate.id === id && !candidate.archived);
-      if (!photo) return json({ error: 'photo not found' }, { status: 404 });
+      const items = await getIndexItems(env);
+      const item = items.find((candidate) => candidate.id === id && !candidate.archived);
+      const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
+      if (!photo || photo.archived) return json({ error: 'photo not found' }, { status: 404 });
       const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
       if (needsRendition) await createShareRenditions(env, photo);
       if (!photo.shareToken) {
-        const usedTokens = new Set(photos.map((candidate) => candidate.shareToken).filter(Boolean));
+        const usedTokens = new Set(items.map((candidate) => candidate.shareToken).filter(Boolean));
         let token = generateShareToken();
         while (usedTokens.has(token)) token = generateShareToken();
         photo.shareToken = token;
@@ -964,6 +986,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       }
       photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
       try {
+        await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
         await setPhotoMeta(env, photo);
       } catch (error) {
         if (needsRendition) await deleteShareRenditions(env, photo);
@@ -980,8 +1003,9 @@ async function handle(req: Request, env: Env): Promise<Response> {
     }
     if (shareActionMatch && req.method === 'DELETE') {
       const id = shareActionMatch[1];
-      const photos = await getAllPhotos(env);
-      const photo = photos.find((candidate) => candidate.id === id);
+      const items = await getIndexItems(env);
+      const item = items.find((candidate) => candidate.id === id);
+      const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
       if (photo.shareToken) {
         photo.shareToken = undefined;
@@ -989,6 +1013,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         photo.shareRenditionVersion = undefined;
         photo.updatedAt = new Date().toISOString();
         await setPhotoMeta(env, photo);
+        await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
         await deleteShareRenditions(env, photo);
       }
       return new Response(null, { status: 204, headers: cors });
