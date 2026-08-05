@@ -877,6 +877,7 @@ test('share creation fails closed when a privacy-safe rendition cannot be produc
   assert.equal(create.status, 502);
   assert.deepEqual(await create.json(), {
     error: 'could not prepare a privacy-safe share rendition',
+    code: 'share_rendition_image_transform',
     storage: 'drive9',
   });
 
@@ -884,6 +885,22 @@ test('share creation fails closed when a privacy-safe rendition cannot be produc
   assert.equal(stored.shareToken, undefined);
   assert.equal(stored.shareRenditionVersion, undefined);
   assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
+});
+
+test('share creation exposes only a fixed code when the Images binding is unavailable', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('private.jpg', 'image/jpeg', new Uint8Array([9, 8, 7]));
+
+  const create = await handler(
+    new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }),
+    { ...env, IMAGES: undefined },
+  );
+  assert.equal(create.status, 502);
+  assert.deepEqual(await create.json(), {
+    error: 'could not prepare a privacy-safe share rendition',
+    code: 'share_rendition_images_binding',
+    storage: 'drive9',
+  });
 });
 
 test('share creation fails closed if transformed image bytes still contain EXIF or XMP', async () => {
@@ -899,6 +916,7 @@ test('share creation fails closed if transformed image bytes still contain EXIF 
 
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
   assert.equal(create.status, 502);
+  assert.equal((await create.json()).code, 'share_rendition_privacy_scan');
   assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
   const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
   assert.equal(stored.shareToken, undefined);
