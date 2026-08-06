@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isSharePath, readShareResponse, sharePageUrl, shareTokenFromPath } from './shareLink.js';
+import {
+  isSharePath,
+  PUBLIC_SHARE_MAX_WAIT_MS,
+  PUBLIC_SHARE_POLL_INTERVAL_MS,
+  readPublicShareResponse,
+  readShareResponse,
+  sharePageUrl,
+  shareTokenFromPath,
+} from './shareLink.js';
 
 const token = 'AbCdEf0123456789_-AbCdEf01234567';
 
@@ -73,5 +81,33 @@ test('readShareResponse reports the HTTP status for a non-JSON gateway response'
   await assert.rejects(
     readShareResponse(response),
     { message: 'Share is unavailable (HTTP 502).' },
+  );
+});
+
+test('readPublicShareResponse classifies 425 as a retryable preparation state', async () => {
+  const response = new Response(JSON.stringify({
+    error: 'Share rendition is still preparing.',
+    code: 'share_rendition_preparing',
+  }), { status: 425, headers: { 'retry-after': '3' } });
+
+  assert.deepEqual(await readPublicShareResponse(response), { status: 'preparing', photo: null, retryAfterMs: 3000 });
+});
+
+test('public share preparation polling has a finite twenty-minute ceiling and bounded retry hint', async () => {
+  assert.equal(PUBLIC_SHARE_POLL_INTERVAL_MS, 3000);
+  assert.equal(PUBLIC_SHARE_MAX_WAIT_MS, 20 * 60 * 1000);
+  const response = new Response('', { status: 425, headers: { 'retry-after': '999999' } });
+  assert.equal((await readPublicShareResponse(response)).retryAfterMs, 30_000);
+});
+
+test('readPublicShareResponse returns ready metadata and rejects terminal failures', async () => {
+  const photo = { title: 'Ready clip', mediaKind: 'video' };
+  assert.deepEqual(
+    await readPublicShareResponse(new Response(JSON.stringify({ photo }), { status: 200 })),
+    { status: 'ready', photo, retryAfterMs: 0 },
+  );
+  await assert.rejects(
+    readPublicShareResponse(new Response(JSON.stringify({ error: 'Share rendition is unavailable.' }), { status: 503 })),
+    { message: 'Share rendition is unavailable.', status: 503 },
   );
 });

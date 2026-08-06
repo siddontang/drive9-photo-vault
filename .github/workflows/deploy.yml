@@ -19,6 +19,16 @@ jobs:
       - name: Install worker dependencies
         working-directory: worker
         run: npm ci
+      - name: Ensure share rendition queues
+        working-directory: worker
+        run: |
+          ensure_queue() {
+            npx wrangler queues info "$1" >/dev/null 2>&1 || npx wrangler queues create "$1"
+          }
+          ensure_queue photovault-share-renditions
+          ensure_queue photovault-share-renditions-dlq
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - name: Deploy worker
         working-directory: worker
         run: npx wrangler deploy

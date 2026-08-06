@@ -32,6 +32,8 @@ Browser / Netlify React app
         v
 Cloudflare Worker API
         |
+        +--> Cloudflare Queue (video share preparation)
+        |
         v
 drive9 filesystem
   /photovault/index.json       metadata index
@@ -110,7 +112,7 @@ On every push to `main`:
 
 Required GitHub repository secrets:
 
-- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_API_TOKEN` — must be able to deploy Workers and create/read Queues
 - `NETLIFY_AUTH_TOKEN`
 - `NETLIFY_SITE_ID`
 
@@ -127,8 +129,9 @@ Workflow file:
 - This is a demo, not a full multi-user auth product yet.
 - Current ownership is a lightweight browser-local `guest-*` id.
 - The gallery remains a public demo rather than a complete account/auth product. Share links use unguessable tokens, expose only one media item, and can be revoked; they are not a replacement for future authenticated library access.
-- Public share links never stream the original upload. Creating a share first produces a bounded JPEG or H.264/MP4 display rendition; Cloudflare Image Transformations uses `metadata=none`, Media Transformations re-encodes videos, and the social poster is a freshly encoded JPEG. If a privacy-safe rendition cannot be produced, sharing fails closed.
-- Cloudflare Media Transformations currently limits transformed video output to 60 seconds. Longer or unsupported videos remain private and share creation returns an error instead of falling back to the original upload.
+- Public share links never stream the original upload. Images produce a bounded JPEG before the link is returned. Videos persist an unguessable token, enqueue a single-concurrency background job, and return `status=preparing`; the queue consumer then produces an H.264/MP4 display rendition and freshly encoded JPEG poster. Public metadata, file, and poster endpoints return `425` with `Cache-Control: no-store` until both outputs are ready, and never transform inline or fall back to original bytes.
+- Video jobs are fenced by photo id, source object/checksum, share token, and rendition version. Revoked, archived, deleted, or replaced sources cannot publish stale output. Failed attempts remove partial outputs, expose a terminal `503` state, and are retried by Cloudflare Queues.
+- Cloudflare Media Transformations currently limits transformed video output to 60 seconds. Longer or unsupported videos remain private and the queued preparation fails instead of falling back to the original upload.
 - X and Facebook use their official web share intents. WeChat QR codes are generated in the browser and the token-bearing URL is never sent to a third-party QR service.
 - **Upload limits**: videos support exactly 40,000,000 bytes (40 MB); images remain limited to 25 MiB. The web app streams the raw file body and the Worker forwards sequential Drive9 multipart chunks, so it never retains a whole video in memory. Legacy `multipart/form-data` uploads remain limited to 25 MiB because parsing them buffers the request.
 - **Video playback**: the Worker proxies the file from drive9. HTTP Range requests are forwarded when drive9 supports them; otherwise the full file is downloaded. For short demo clips this is acceptable.

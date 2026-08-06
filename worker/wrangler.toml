@@ -10,3 +10,16 @@ binding = "IMAGES"
 
 [media]
 binding = "MEDIA"
+
+[[queues.producers]]
+binding = "SHARE_RENDITION_QUEUE"
+queue = "photovault-share-renditions"
+
+[[queues.consumers]]
+queue = "photovault-share-renditions"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 5
+retry_delay = 60
+max_concurrency = 1
+dead_letter_queue = "photovault-share-renditions-dlq"

@@ -8,7 +8,14 @@ import Lightbox from './Lightbox';
 import ShareActions from './ShareActions.jsx';
 import { reanchorIndex } from './lightboxNav.js';
 import { createLatestRequestGate } from './latestRequest.js';
-import { isSharePath, readShareResponse, sharePageUrl, shareTokenFromPath } from './shareLink.js';
+import {
+  isSharePath,
+  PUBLIC_SHARE_MAX_WAIT_MS,
+  readPublicShareResponse,
+  readShareResponse,
+  sharePageUrl,
+  shareTokenFromPath,
+} from './shareLink.js';
 import { buildStreamUploadRequest } from './uploadRequest.js';
 
 const API = import.meta.env.VITE_API_BASE || '';
@@ -127,7 +134,7 @@ function LangSwitch({ lang, setLang, t, coach = true }) {
   </div>;
 }
 
-function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canNativeShare, t, onClose, onNativeShare, onCopy, onRevoke, onCancelRevoke }) {
+function ShareSheet({ photo, link, busy, renditionPreparing, copied, manualCopy, confirmRevoke, canNativeShare, t, onClose, onNativeShare, onCopy, onRevoke, onCancelRevoke }) {
   const sheetRef = useRef(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -144,7 +151,8 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
     };
   }, []);
 
-  const preparing = busy && !link;
+  const waitingForResponse = busy && !link;
+  const preparing = waitingForResponse || renditionPreparing;
 
   return <div className="shareOverlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section ref={sheetRef} className="shareSheet" role="dialog" aria-modal="true" aria-labelledby="shareSheetTitle" aria-describedby={preparing ? 'sharePreparingBody' : 'shareAccessBody'} tabIndex={-1}>
@@ -156,10 +164,11 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
       <div className="shareSheetBody">
         <div className="shareSheetEyebrow">{t.share}</div>
         <h2 id="shareSheetTitle">{photo.title}</h2>
-        {preparing ? <div className="sharePreparing" role="status" aria-live="polite">
+        {preparing && <div className="sharePreparing" role="status" aria-live="polite">
           <LoaderCircle className="spin" size={24} />
           <span><b>{t.sharePreparingTitle}</b><small id="sharePreparingBody">{t.sharePreparingBody}</small></span>
-        </div> : <>
+        </div>}
+        {!waitingForResponse && <>
         <div className="shareAccess">
           <span className="shareAccessIcon"><Globe2 size={18} /></span>
           <span><b>{t.shareAccessTitle}</b><small id="shareAccessBody">{t.shareAccessBody}</small></span>
@@ -197,7 +206,8 @@ function ShareSheet({ photo, link, busy, copied, manualCopy, confirmRevoke, canN
 function SharedPhotoPage({ token }) {
   const { lang, setLang, t } = useLang();
   const [photo, setPhoto] = useState(null);
-  const [unavailable, setUnavailable] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [unavailableReason, setUnavailableReason] = useState('');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -218,17 +228,39 @@ function SharedPhotoPage({ token }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    setUnavailable(false);
-    fetch(apiUrl(`/api/shares/${token}`), { cache: 'no-store', signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error('share unavailable');
-        return response.json();
-      })
-      .then((payload) => setPhoto(payload.photo))
-      .catch((reason) => {
-        if (reason?.name !== 'AbortError') setUnavailable(true);
-      });
-    return () => controller.abort();
+    let retryTimer;
+    const preparationDeadline = Date.now() + PUBLIC_SHARE_MAX_WAIT_MS;
+    setPhoto(null);
+    setUnavailableReason('');
+    setPreparing(false);
+    const loadShare = async () => {
+      try {
+        const response = await fetch(apiUrl(`/api/shares/${token}`), { cache: 'no-store', signal: controller.signal });
+        const result = await readPublicShareResponse(response);
+        if (result.status === 'preparing') {
+          if (Date.now() >= preparationDeadline) {
+            setPreparing(false);
+            setUnavailableReason('timeout');
+            return;
+          }
+          setPreparing(true);
+          retryTimer = setTimeout(loadShare, result.retryAfterMs);
+          return;
+        }
+        setPreparing(false);
+        setPhoto(result.photo);
+      } catch (reason) {
+        if (reason?.name !== 'AbortError') {
+          setPreparing(false);
+          setUnavailableReason(reason?.status === 503 ? 'failed' : 'unavailable');
+        }
+      }
+    };
+    loadShare();
+    return () => {
+      controller.abort();
+      clearTimeout(retryTimer);
+    };
   }, [token]);
 
   useEffect(() => {
@@ -258,8 +290,12 @@ function SharedPhotoPage({ token }) {
       <LangSwitch lang={lang} setLang={setLang} t={t} coach={false} />
     </header>
     <section className="sharedStage" aria-live="polite">
-      {unavailable && <div className="sharedUnavailable">{t.shareUnavailable}</div>}
-      {!unavailable && !photo && <div className="sharedUnavailable"><LoaderCircle className="spin" size={22} /><span>{t.loadingShare}</span></div>}
+      {unavailableReason && <div className="sharedUnavailable">{
+        unavailableReason === 'timeout'
+          ? t.sharePreparationTimeout
+          : unavailableReason === 'failed' ? t.sharePreparationFailed : t.shareUnavailable
+      }</div>}
+      {!unavailableReason && !photo && <div className="sharedUnavailable"><LoaderCircle className="spin" size={22} /><span>{preparing ? t.sharePreparingPublic : t.loadingShare}</span></div>}
       {photo && <>
         <div className="sharedMediaScene">
           {!video && <img className="sharedBackdrop" src={mediaUrl} alt="" aria-hidden="true" />}
@@ -485,7 +521,7 @@ function App() {
       setShareCopied(false);
       setManualShareCopy(false);
       setConfirmRevoke(false);
-      setShareSheet({ photo, link: photo.shareLink });
+      setShareSheet({ photo, link: photo.shareLink, renditionPreparing: !!photo.sharePreparing });
       return;
     }
     const requestId = ++shareRequestSequence.current;
@@ -497,13 +533,14 @@ function App() {
       const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'POST' });
       const payload = await readShareResponse(response);
       const link = sharePageUrl(window.location.origin, payload.share.token);
-      const sharedPhoto = { ...photo, shared: true, shareLink: link };
-      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: true, shareLink: link } : item));
+      const renditionPreparing = payload.share.status === 'preparing';
+      const sharedPhoto = { ...photo, shared: true, shareLink: link, sharePreparing: renditionPreparing };
+      setPhotos((current) => current.map((item) => item.id === photo.id ? sharedPhoto : item));
       setShareCopied(false);
       setManualShareCopy(false);
       setConfirmRevoke(false);
-      if (dismissedShareRequest.current === requestId) setToast(t.shareReady);
-      else setShareSheet({ photo: sharedPhoto, link });
+      if (dismissedShareRequest.current === requestId) setToast(renditionPreparing ? t.shareLinkCreated : t.shareReady);
+      else setShareSheet({ photo: sharedPhoto, link, renditionPreparing });
     } catch (reason) {
       setError(t.shareFailed(reason?.message || reason));
       setShareSheet((current) => current?.requestId === requestId ? null : current);
@@ -551,7 +588,12 @@ function App() {
     try {
       const response = await fetch(apiUrl(`/api/photos/${photo.id}/share`), { method: 'DELETE' });
       if (!response.ok) throw new Error(await response.text());
-      setPhotos((current) => current.map((item) => item.id === photo.id ? { ...item, shared: false, shareLink: undefined } : item));
+      setPhotos((current) => current.map((item) => item.id === photo.id ? {
+        ...item,
+        shared: false,
+        shareLink: undefined,
+        sharePreparing: false,
+      } : item));
       setShareSheet(null);
       setConfirmRevoke(false);
       setToast(t.shareRevoked);
@@ -701,6 +743,7 @@ function App() {
         photo={shareSheet.photo}
         link={shareSheet.link}
         busy={shareBusyId === shareSheet.photo.id}
+        renditionPreparing={shareSheet.renditionPreparing}
         copied={shareCopied}
         manualCopy={manualShareCopy}
         confirmRevoke={confirmRevoke}

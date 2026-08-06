@@ -7,9 +7,25 @@ export interface Env {
   DRIVE9_SERVER?: string;
   IMAGES?: ImagesBinding;
   MEDIA?: MediaBinding;
+  SHARE_RENDITION_QUEUE?: Queue<ShareRenditionJob>;
 }
 
 type MediaKind = 'image' | 'video';
+type ShareRenditionStatus = 'preparing' | 'ready' | 'failed';
+
+type ShareRenditionJob = {
+  photoId: string;
+  shareToken: string;
+  renditionVersion: number;
+  sourceObjectKey: string;
+  sourceChecksum: string;
+};
+
+type ShareRenditionState = {
+  status: ShareRenditionStatus;
+  renditionVersion: number;
+  updatedAt: string;
+};
 
 type Photo = {
   id: string;
@@ -120,6 +136,7 @@ const SHARE_TOKEN_BYTES = 24;
 const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const SHARE_RENDITION_ROOT = `${ROOT}/share-renditions`;
 const SHARE_RENDITION_VERSION = 1;
+const SHARE_RENDITION_RETRY_DELAY_SECONDS = 60;
 const SHARE_PRIVATE_METADATA_MARKERS = [
   new TextEncoder().encode('Exif\0\0'),
   new TextEncoder().encode('http://ns.adobe.com/xap/1.0/'),
@@ -462,14 +479,43 @@ async function findSharedPhoto(env: Env, token: string) {
   return null;
 }
 
-function shareDisplayPath(photo: Photo) {
-  return `${SHARE_RENDITION_ROOT}/${photo.id}.${inferMediaKind(photo) === 'video' ? 'mp4' : 'jpg'}`;
+function shareDisplayPath(photo: Photo, token?: string) {
+  const suffix = inferMediaKind(photo) === 'video' && token ? `.${token}` : '';
+  return `${SHARE_RENDITION_ROOT}/${photo.id}${suffix}.${inferMediaKind(photo) === 'video' ? 'mp4' : 'jpg'}`;
 }
 
-function sharePosterPath(photo: Photo) {
+function sharePosterPath(photo: Photo, token?: string) {
   return inferMediaKind(photo) === 'video'
-    ? `${SHARE_RENDITION_ROOT}/${photo.id}.poster.jpg`
+    ? `${SHARE_RENDITION_ROOT}/${photo.id}${token ? `.${token}` : ''}.poster.jpg`
+    : shareDisplayPath(photo, token);
+}
+
+function shareRenditionStatePath(photo: Photo, token: string) {
+  return videoShareRenditionStatePath(photo.id, token);
+}
+
+function videoShareRenditionStatePath(photoId: string, token: string) {
+  return `${SHARE_RENDITION_ROOT}/${photoId}.${token}.state.json`;
+}
+
+function videoShareDisplayPath(photoId: string, token: string) {
+  return `${SHARE_RENDITION_ROOT}/${photoId}.${token}.mp4`;
+}
+
+function videoSharePosterPath(photoId: string, token: string) {
+  return `${SHARE_RENDITION_ROOT}/${photoId}.${token}.poster.jpg`;
+}
+
+function publicShareDisplayPath(photo: Photo, token: string) {
+  return inferMediaKind(photo) === 'video' && photo.shareRenditionVersion !== SHARE_RENDITION_VERSION
+    ? shareDisplayPath(photo, token)
     : shareDisplayPath(photo);
+}
+
+function publicSharePosterPath(photo: Photo, token: string) {
+  return inferMediaKind(photo) === 'video' && photo.shareRenditionVersion !== SHARE_RENDITION_VERSION
+    ? sharePosterPath(photo, token)
+    : sharePosterPath(photo);
 }
 
 async function drive9PhotoResponse(env: Env, photo: Photo) {
@@ -550,7 +596,7 @@ async function createImageShareRendition(env: Env, photo: Photo) {
   await writeShareRendition(env, shareDisplayPath(photo), 'image/jpeg', response.body);
 }
 
-async function createVideoShareRenditions(env: Env, photo: Photo) {
+async function createVideoShareRenditions(env: Env, photo: Photo, token: string) {
   if (!env.MEDIA) throw new ShareRenditionError('media_binding', 'media transformation is unavailable');
 
   const videoSource = await drive9PhotoResponse(env, photo);
@@ -559,7 +605,7 @@ async function createVideoShareRenditions(env: Env, photo: Photo) {
     .output({ mode: 'video', audio: true })
     .response();
   if (!video.ok) throw new ShareRenditionError('video_transform', `video transformation failed (${video.status})`);
-  await writeShareRendition(env, shareDisplayPath(photo), 'video/mp4', video.body);
+  await writeShareRendition(env, shareDisplayPath(photo, token), 'video/mp4', video.body);
 
   const posterSource = await drive9PhotoResponse(env, photo);
   const poster = await env.MEDIA.input(posterSource.body!)
@@ -567,20 +613,34 @@ async function createVideoShareRenditions(env: Env, photo: Photo) {
     .output({ mode: 'frame', time: '0s', format: 'jpg' })
     .response();
   if (!poster.ok) throw new ShareRenditionError('video_poster_transform', `video poster transformation failed (${poster.status})`);
-  await writeShareRendition(env, sharePosterPath(photo), 'image/jpeg', poster.body);
+  await writeShareRendition(env, sharePosterPath(photo, token), 'image/jpeg', poster.body);
 }
 
-async function deleteShareRenditions(env: Env, photo: Photo) {
-  const paths = [...new Set([shareDisplayPath(photo), sharePosterPath(photo)])];
+async function deleteShareRenditions(env: Env, photo: Photo, token?: string, includeLegacy = true) {
+  const paths = [...new Set([
+    ...(includeLegacy ? [shareDisplayPath(photo), sharePosterPath(photo)] : []),
+    ...(token ? [shareDisplayPath(photo, token), sharePosterPath(photo, token), shareRenditionStatePath(photo, token)] : []),
+  ])];
   await Promise.allSettled(paths.map((path) => d9(env, 'DELETE', path)));
 }
 
-async function createShareRenditions(env: Env, photo: Photo) {
+async function deleteVideoShareRenditionArtifacts(env: Env, photoId: string, token: string) {
+  await Promise.allSettled([
+    videoShareDisplayPath(photoId, token),
+    videoSharePosterPath(photoId, token),
+    videoShareRenditionStatePath(photoId, token),
+  ].map((path) => d9(env, 'DELETE', path)));
+}
+
+async function createShareRenditions(env: Env, photo: Photo, token?: string) {
   if (inferMediaKind(photo) === 'image' && photo.size > IMAGE_SHARE_SIZE_LIMIT) {
     throw new HttpError(422, 'This image is too large to share safely. Maximum shareable image size is 20 MB.');
   }
   try {
-    if (inferMediaKind(photo) === 'video') await createVideoShareRenditions(env, photo);
+    if (inferMediaKind(photo) === 'video') {
+      if (!token) throw new ShareRenditionError('video_transform', 'video share token is unavailable');
+      await createVideoShareRenditions(env, photo, token);
+    }
     else await createImageShareRendition(env, photo);
   } catch (error) {
     const stage = error instanceof ShareRenditionError ? error.stage : 'unknown';
@@ -590,7 +650,7 @@ async function createShareRenditions(env: Env, photo: Photo) {
       stage,
       reason: error instanceof Error ? error.message : 'unknown error',
     });
-    await deleteShareRenditions(env, photo);
+    await deleteShareRenditions(env, photo, token, !token);
     const code = error instanceof ShareRenditionError
       ? `share_rendition_${error.stage}`
       : 'share_rendition_unavailable';
@@ -598,16 +658,50 @@ async function createShareRenditions(env: Env, photo: Photo) {
   }
 }
 
-async function ensurePublicShareRendition(env: Env, photo: Photo) {
+async function readShareRenditionState(env: Env, photo: Photo, token: string): Promise<ShareRenditionState | null> {
+  const response = await d9(env, 'GET', shareRenditionStatePath(photo, token));
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`drive9 read share rendition state failed: ${response.status}`);
+  const state = await response.json() as Partial<ShareRenditionState>;
+  if (
+    state.renditionVersion !== SHARE_RENDITION_VERSION
+    || !['preparing', 'ready', 'failed'].includes(String(state.status))
+    || typeof state.updatedAt !== 'string'
+  ) return null;
+  return state as ShareRenditionState;
+}
+
+async function writeShareRenditionState(env: Env, photo: Photo, token: string, status: ShareRenditionStatus) {
+  const response = await d9(env, 'PUT', shareRenditionStatePath(photo, token), JSON.stringify({
+    status,
+    renditionVersion: SHARE_RENDITION_VERSION,
+    updatedAt: new Date().toISOString(),
+  } satisfies ShareRenditionState), {
+    'content-type': 'application/json',
+    'x-dat9-description': 'PhotoVault public share rendition state',
+  });
+  if (!response.ok) throw new Error(`drive9 write share rendition state failed: ${response.status}`);
+}
+
+async function ensurePublicShareRendition(env: Env, photo: Photo, token: string) {
   if (photo.shareRenditionVersion === SHARE_RENDITION_VERSION) return;
-  await createShareRenditions(env, photo);
-  photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
-  try {
-    await setPhotoMeta(env, photo);
-  } catch (error) {
-    await deleteShareRenditions(env, photo);
-    throw error;
+  if (inferMediaKind(photo) === 'image') {
+    await createShareRenditions(env, photo);
+    photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
+    try {
+      await setPhotoMeta(env, photo);
+      return;
+    } catch (error) {
+      await deleteShareRenditions(env, photo);
+      throw error;
+    }
   }
+  const state = await readShareRenditionState(env, photo, token);
+  if (state?.status === 'ready') return;
+  if (state?.status === 'failed') {
+    throw new HttpError(503, 'Share rendition is unavailable.', 'share_rendition_failed');
+  }
+  throw new HttpError(425, 'Share rendition is still preparing.', 'share_rendition_preparing');
 }
 async function setIndex(env: Env, photos: (Photo | PhotoIndexItem)[]) {
   const payload = JSON.stringify(photos.map((p) => compactPhotoForIndex(photoFromIndexItem(p as any))));
@@ -619,6 +713,95 @@ async function setPhotoMeta(env: Env, photo: Photo) {
   const compact = compactPhotoMeta(photo);
   const res = await d9(env, 'PUT', metaPath(photo.id), JSON.stringify(compact), { 'content-type': 'application/json', 'x-dat9-description': `PhotoVault metadata for ${photo.title}` });
   if (!res.ok) throw new Error(`drive9 write ${metaPath(photo.id)} failed: ${res.status} ${await res.text()}`);
+}
+
+async function currentVideoShareTarget(env: Env, job: ShareRenditionJob) {
+  const items = await getIndexItems(env);
+  const item = items.find((candidate) => candidate.id === job.photoId && !candidate.archived);
+  const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
+  if (
+    !item
+    || !photo
+    || photo.archived
+    || inferMediaKind(photo) !== 'video'
+    || item.shareToken !== job.shareToken
+    || photo.shareToken !== job.shareToken
+    || photo.objectKey !== job.sourceObjectKey
+    || photo.checksum !== job.sourceChecksum
+  ) return null;
+  return { photo };
+}
+
+async function enqueueVideoShareRendition(env: Env, photo: Photo, token: string) {
+  if (!env.SHARE_RENDITION_QUEUE) {
+    throw new HttpError(503, 'Video share preparation is temporarily unavailable.', 'share_rendition_queue_unavailable');
+  }
+  try {
+    await env.SHARE_RENDITION_QUEUE.send({
+      photoId: photo.id,
+      shareToken: token,
+      renditionVersion: SHARE_RENDITION_VERSION,
+      sourceObjectKey: photo.objectKey,
+      sourceChecksum: photo.checksum,
+    });
+  } catch {
+    throw new HttpError(503, 'Video share preparation is temporarily unavailable.', 'share_rendition_queue_unavailable');
+  }
+}
+
+async function prepareVideoShareRendition(env: Env, job: ShareRenditionJob) {
+  if (job.renditionVersion !== SHARE_RENDITION_VERSION || !SHARE_TOKEN_PATTERN.test(job.shareToken)) return;
+  const current = await currentVideoShareTarget(env, job);
+  if (!current) {
+    await deleteVideoShareRenditionArtifacts(env, job.photoId, job.shareToken);
+    return;
+  }
+  const state = await readShareRenditionState(env, current.photo, job.shareToken);
+  if (state?.status === 'ready') return;
+
+  await writeShareRenditionState(env, current.photo, job.shareToken, 'preparing');
+  await createShareRenditions(env, current.photo, job.shareToken);
+
+  const latest = await currentVideoShareTarget(env, job);
+  if (!latest) {
+    await deleteShareRenditions(env, current.photo, job.shareToken, false);
+    return;
+  }
+  await writeShareRenditionState(env, latest.photo, job.shareToken, 'ready');
+}
+
+async function recordVideoShareRenditionFailure(env: Env, job: ShareRenditionJob) {
+  const current = await currentVideoShareTarget(env, job);
+  if (!current) {
+    await deleteVideoShareRenditionArtifacts(env, job.photoId, job.shareToken);
+    return;
+  }
+  await deleteShareRenditions(env, current.photo, job.shareToken, false);
+  await writeShareRenditionState(env, current.photo, job.shareToken, 'failed');
+}
+
+async function handleShareRenditionQueue(batch: MessageBatch<ShareRenditionJob>, env: Env) {
+  for (const message of batch.messages) {
+    try {
+      await prepareVideoShareRendition(env, message.body);
+      message.ack();
+    } catch (error) {
+      console.error('queued share rendition failed', {
+        photoId: message.body.photoId,
+        attempt: message.attempts,
+        reason: error instanceof Error ? error.message : 'unknown error',
+      });
+      try {
+        await recordVideoShareRenditionFailure(env, message.body);
+      } catch (stateError) {
+        console.error('queued share failure state write failed', {
+          photoId: message.body.photoId,
+          reason: stateError instanceof Error ? stateError.message : 'unknown error',
+        });
+      }
+      message.retry({ delaySeconds: SHARE_RENDITION_RETRY_DELAY_SECONDS });
+    }
+  }
 }
 async function deletePhotoMeta(env: Env, id: string) {
   const res = await d9(env, 'DELETE', metaPath(id));
@@ -783,7 +966,7 @@ export function drive9SemanticContentPresent(meta: unknown): boolean {
 function openapi(origin: string) {
   return {
     openapi: '3.1.0',
-    info: { title: 'PhotoVault OpenAPI', version: '0.3.0', description: 'Drive9-native media (photo + video) storage, management, and search API.' },
+    info: { title: 'PhotoVault OpenAPI', version: '0.4.0', description: 'Drive9-native media (photo + video) storage, management, search, and privacy-safe sharing API.' },
     servers: [{ url: origin }],
     paths: {
       '/api/health': { get: { summary: 'Health check', responses: { '200': { description: 'OK' } } } },
@@ -802,13 +985,17 @@ function openapi(origin: string) {
       },
       '/api/photos/{id}': { patch: { summary: 'Update metadata/state' }, delete: { summary: 'Delete photo from drive9' } },
       '/api/photos/{id}/share': {
-        post: { summary: 'Create or return the current public read-only share link for one media item' },
+        post: {
+          summary: 'Create or return the current public read-only share link for one media item',
+          description: 'Images are prepared synchronously. Videos return status=preparing after durable queueing, then become public only after a privacy-safe video and poster are ready.',
+          responses: { '200': { description: 'Current share link with ready or preparing status' }, '503': { description: 'Video preparation could not be queued' } },
+        },
         delete: { summary: 'Revoke the current share link for one media item' },
       },
       '/api/photos/{id}/file': { get: { summary: 'Stream original media bytes from drive9 (supports Range for video)' } },
-      '/api/shares/{token}': { get: { summary: 'Read metadata for one publicly shared media item' } },
-      '/api/shares/{token}/file': { get: { summary: 'Stream a metadata-stripped public display rendition using an unguessable token' } },
-      '/api/shares/{token}/poster': { get: { summary: 'Read a metadata-stripped JPEG social preview using an unguessable token' } },
+      '/api/shares/{token}': { get: { summary: 'Read metadata for one publicly shared media item', responses: { '200': { description: 'Privacy-safe share is ready' }, '425': { description: 'Video rendition is still preparing; response is no-store' }, '503': { description: 'Video rendition preparation failed' } } } },
+      '/api/shares/{token}/file': { get: { summary: 'Stream a metadata-stripped public display rendition using an unguessable token', responses: { '200': { description: 'Privacy-safe media bytes' }, '425': { description: 'Video rendition is still preparing; original bytes are never returned' }, '503': { description: 'Video rendition preparation failed' } } } },
+      '/api/shares/{token}/poster': { get: { summary: 'Read a metadata-stripped JPEG social preview using an unguessable token', responses: { '200': { description: 'Privacy-safe JPEG poster' }, '425': { description: 'Video poster is still preparing; original bytes are never returned' }, '503': { description: 'Video rendition preparation failed' } } } },
       '/api/collections': { get: { summary: 'Smart collections from drive9 metadata' } }
     }
   };
@@ -840,10 +1027,10 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const token = sharedFileMatch[1];
       const photo = await findSharedPhoto(env, token);
       if (!photo) return json({ error: 'share not found' }, { status: 404 });
-      await ensurePublicShareRendition(env, photo);
+      await ensurePublicShareRendition(env, photo, token);
       return proxyPhotoFile(req, env, {
         ...photo,
-        objectKey: shareDisplayPath(photo),
+        objectKey: publicShareDisplayPath(photo, token),
         mime: inferMediaKind(photo) === 'video' ? 'video/mp4' : 'image/jpeg',
       }, 'private, no-store');
     }
@@ -852,10 +1039,10 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const token = sharedPosterMatch[1];
       const photo = await findSharedPhoto(env, token);
       if (!photo) return json({ error: 'share not found' }, { status: 404 });
-      await ensurePublicShareRendition(env, photo);
+      await ensurePublicShareRendition(env, photo, token);
       return proxyPhotoFile(req, env, {
         ...photo,
-        objectKey: sharePosterPath(photo),
+        objectKey: publicSharePosterPath(photo, token),
         mime: 'image/jpeg',
       }, 'private, no-store');
     }
@@ -864,7 +1051,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const token = sharedMatch[1];
       const photo = await findSharedPhoto(env, token);
       if (!photo) return json({ error: 'share not found' }, { status: 404 });
-      await ensurePublicShareRendition(env, photo);
+      await ensurePublicShareRendition(env, photo, token);
       return json({ photo: photoForShare(photo, url.origin, token), storage: 'drive9' });
     }
     if (path === '/api/photos' && req.method === 'GET') {
@@ -974,23 +1161,22 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const item = items.find((candidate) => candidate.id === id && !candidate.archived);
       const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
       if (!photo || photo.archived) return json({ error: 'photo not found' }, { status: 404 });
-      if (
-        photo.shareToken
-        && photo.shareRenditionVersion === SHARE_RENDITION_VERSION
-        && item?.shareToken === photo.shareToken
-        && item.shareRenditionVersion === SHARE_RENDITION_VERSION
-      ) {
-        return json({
-          share: {
-            token: photo.shareToken,
-            url: `${url.origin}/api/shares/${photo.shareToken}`,
-            sharedAt: photo.sharedAt,
-          },
-          storage: 'drive9',
-        });
+      const shareResponse = (status: ShareRenditionStatus) => json({
+        share: {
+          token: photo.shareToken,
+          url: `${url.origin}/api/shares/${photo.shareToken}`,
+          sharedAt: photo.sharedAt,
+          status,
+        },
+        storage: 'drive9',
+      });
+      if (photo.shareToken && photo.shareRenditionVersion === SHARE_RENDITION_VERSION) {
+        if (item?.shareToken !== photo.shareToken || item.shareRenditionVersion !== SHARE_RENDITION_VERSION) {
+          await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
+        }
+        return shareResponse('ready');
       }
-      const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
-      if (needsRendition) await createShareRenditions(env, photo);
+
       if (!photo.shareToken) {
         const usedTokens = new Set(items.map((candidate) => candidate.shareToken).filter(Boolean));
         let token = generateShareToken();
@@ -999,6 +1185,21 @@ async function handle(req: Request, env: Env): Promise<Response> {
         photo.sharedAt = new Date().toISOString();
         photo.updatedAt = photo.sharedAt;
       }
+
+      if (inferMediaKind(photo) === 'video') {
+        const token = photo.shareToken;
+        const state = await readShareRenditionState(env, photo, token);
+        photo.shareRenditionVersion = undefined;
+        await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
+        await setPhotoMeta(env, photo);
+        if (state?.status === 'ready') return shareResponse('ready');
+        await writeShareRenditionState(env, photo, token, 'preparing');
+        await enqueueVideoShareRendition(env, photo, token);
+        return shareResponse('preparing');
+      }
+
+      const needsRendition = photo.shareRenditionVersion !== SHARE_RENDITION_VERSION;
+      if (needsRendition) await createShareRenditions(env, photo);
       photo.shareRenditionVersion = SHARE_RENDITION_VERSION;
       try {
         await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
@@ -1007,14 +1208,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
         if (needsRendition) await deleteShareRenditions(env, photo);
         throw error;
       }
-      return json({
-        share: {
-          token: photo.shareToken,
-          url: `${url.origin}/api/shares/${photo.shareToken}`,
-          sharedAt: photo.sharedAt,
-        },
-        storage: 'drive9',
-      });
+      return shareResponse('ready');
     }
     if (shareActionMatch && req.method === 'DELETE') {
       const id = shareActionMatch[1];
@@ -1023,13 +1217,14 @@ async function handle(req: Request, env: Env): Promise<Response> {
       const photo = item ? await getAuthoritativePhotoMeta(env, item) : null;
       if (!photo) return json({ error: 'photo not found' }, { status: 404 });
       if (photo.shareToken) {
+        const token = photo.shareToken;
         photo.shareToken = undefined;
         photo.sharedAt = undefined;
         photo.shareRenditionVersion = undefined;
         photo.updatedAt = new Date().toISOString();
         await setPhotoMeta(env, photo);
         await setIndex(env, items.map((candidate) => candidate.id === photo.id ? photo : candidate));
-        await deleteShareRenditions(env, photo);
+        await deleteShareRenditions(env, photo, token);
       }
       return new Response(null, { status: 204, headers: cors });
     }
@@ -1060,7 +1255,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       photos[i] = next;
       await setPhotoMeta(env, next);
       await setIndex(env, photos);
-      if (next.archived && !prev.archived) await deleteShareRenditions(env, prev);
+      if (next.archived && !prev.archived) await deleteShareRenditions(env, prev, prev.shareToken);
       return json({ photo: photoForManagement(next, url.origin), storage: 'drive9' });
     }
     if (photoMatch && req.method === 'DELETE') {
@@ -1070,7 +1265,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
       if (found) await d9(env, 'DELETE', found.objectKey);
       await deletePhotoMeta(env, id);
       await setIndex(env, photos.filter((p) => p.id !== id));
-      if (found) await deleteShareRenditions(env, found);
+      if (found) await deleteShareRenditions(env, found, found.shareToken);
       return new Response(null, { status: 204, headers: cors });
     }
     if (path === '/api/collections' && req.method === 'GET') {
@@ -1093,7 +1288,10 @@ async function handle(req: Request, env: Env): Promise<Response> {
         error: e instanceof HttpError ? e.message : 'share temporarily unavailable',
         ...(e instanceof HttpError && e.code ? { code: e.code } : {}),
         storage: 'drive9',
-      }, { status: e instanceof HttpError ? e.status : 503 });
+      }, {
+        status: e instanceof HttpError ? e.status : 503,
+        ...(e instanceof HttpError && e.status === 425 ? { headers: { 'retry-after': '3' } } : {}),
+      });
     }
     const status = e instanceof HttpError ? e.status : e instanceof UploadBodySizeError ? 400 : 500;
     return json({
@@ -1105,4 +1303,4 @@ async function handle(req: Request, env: Env): Promise<Response> {
 }
 function safeJson(s: string) { try { return JSON.parse(s); } catch { return s.slice(0, 500); } }
 export { effectiveVideoMime, mediaKindFromMime, inferMediaKind, VIDEO_SIZE_LIMIT, IMAGE_SIZE_LIMIT, IMAGE_SHARE_SIZE_LIMIT, UPLOAD_METADATA_HEADER };
-export default { fetch: handle };
+export default { fetch: handle, queue: handleShareRenditionQueue };
