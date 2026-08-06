@@ -48,3 +48,30 @@ test('readShareResponse returns a successful share payload', async () => {
   const response = new Response(JSON.stringify(payload), { status: 200 });
   assert.deepEqual(await readShareResponse(response), payload);
 });
+
+test('readShareResponse reports the HTTP status for an empty error response', async () => {
+  const response = new Response(null, { status: 500 });
+
+  await assert.rejects(
+    readShareResponse(response),
+    { message: 'Share is unavailable (HTTP 500).' },
+  );
+});
+
+test('readShareResponse rejects an empty successful response as invalid', async () => {
+  const response = new Response(null, { status: 200 });
+
+  await assert.rejects(
+    readShareResponse(response),
+    { message: 'Share response was not valid (HTTP 200).' },
+  );
+});
+
+test('readShareResponse reports the HTTP status for a non-JSON gateway response', async () => {
+  const response = new Response('<html>bad gateway</html>', { status: 502 });
+
+  await assert.rejects(
+    readShareResponse(response),
+    { message: 'Share is unavailable (HTTP 502).' },
+  );
+});

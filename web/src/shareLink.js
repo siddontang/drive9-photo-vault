@@ -13,7 +13,18 @@ export function sharePageUrl(origin, token) {
 }
 
 export async function readShareResponse(response) {
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload?.error || 'Share is unavailable.');
+  const raw = await response.text();
+  let payload = null;
+  try {
+    payload = raw ? JSON.parse(raw) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || `Share is unavailable (HTTP ${response.status}).`);
+  }
+  if (!payload?.share?.token) {
+    throw new Error(`Share response was not valid (HTTP ${response.status}).`);
+  }
   return payload;
 }
