@@ -137,6 +137,7 @@ const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const SHARE_RENDITION_ROOT = `${ROOT}/share-renditions`;
 const SHARE_RENDITION_VERSION = 1;
 const SHARE_RENDITION_RETRY_DELAY_SECONDS = 60;
+const SHARE_RENDITION_MAX_RETRIES = 5;
 const SHARE_PRIVATE_METADATA_MARKERS = [
   new TextEncoder().encode('Exif\0\0'),
   new TextEncoder().encode('http://ns.adobe.com/xap/1.0/'),
@@ -780,6 +781,10 @@ async function recordVideoShareRenditionFailure(env: Env, job: ShareRenditionJob
   await writeShareRenditionState(env, current.photo, job.shareToken, 'failed');
 }
 
+function isTerminalVideoShareRenditionFailure(error: unknown) {
+  return error instanceof HttpError && error.code === 'share_rendition_privacy_scan';
+}
+
 async function handleShareRenditionQueue(batch: MessageBatch<ShareRenditionJob>, env: Env) {
   for (const message of batch.messages) {
     try {
@@ -791,13 +796,26 @@ async function handleShareRenditionQueue(batch: MessageBatch<ShareRenditionJob>,
         attempt: message.attempts,
         reason: error instanceof Error ? error.message : 'unknown error',
       });
-      try {
-        await recordVideoShareRenditionFailure(env, message.body);
-      } catch (stateError) {
-        console.error('queued share failure state write failed', {
-          photoId: message.body.photoId,
-          reason: stateError instanceof Error ? stateError.message : 'unknown error',
-        });
+
+      const terminal = isTerminalVideoShareRenditionFailure(error);
+      const exhausted = message.attempts > SHARE_RENDITION_MAX_RETRIES;
+      if (terminal || exhausted) {
+        try {
+          await recordVideoShareRenditionFailure(env, message.body);
+        } catch (stateError) {
+          console.error('queued share failure state write failed', {
+            photoId: message.body.photoId,
+            reason: stateError instanceof Error ? stateError.message : 'unknown error',
+          });
+          message.retry({ delaySeconds: SHARE_RENDITION_RETRY_DELAY_SECONDS });
+          continue;
+        }
+        if (terminal) {
+          message.ack();
+          continue;
+        }
+      } else {
+        await deleteVideoShareRenditionArtifacts(env, message.body.photoId, message.body.shareToken);
       }
       message.retry({ delaySeconds: SHARE_RENDITION_RETRY_DELAY_SECONDS });
     }

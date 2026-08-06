@@ -1254,7 +1254,7 @@ test('share creation fails closed if transformed video retains QuickTime locatio
   assert.equal(create.status, 200);
   const { share } = await create.json();
   const drained = await drainShareRenditionQueue();
-  assert.equal(drained.retried.length, 1);
+  assert.equal(drained.retried.length, 0, 'deterministic privacy failures must not be retried');
   assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/') && path.includes(photo.id) && path.endsWith('.mp4')), false);
   const publicFile = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
   assert.equal(publicFile.status, 503);
@@ -1276,10 +1276,43 @@ test('video share creation removes the completed video when poster transformatio
   assert.equal(drained.retried.length, 1);
   assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/') && path.includes(photo.id) && (path.endsWith('.mp4') || path.endsWith('.poster.jpg'))), false);
   const publicPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
-  assert.equal(publicPoster.status, 503);
+  assert.equal(publicPoster.status, 425);
+
+  await runShareRenditionJobs([drained.retried[0]], 5);
+  const finalRetryPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(finalRetryPoster.status, 425);
+
+  await runShareRenditionJobs([drained.retried[0]], 6);
+  const exhaustedPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(exhaustedPoster.status, 503);
+  assert.equal(retriedShareRenditionJobs.length, 3, 'the exhausted delivery must be retried into the configured DLQ');
   const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
   assert.equal(stored.shareToken, share.token);
   assert.equal(stored.shareRenditionVersion, undefined);
+});
+
+test('a retryable video share failure stays preparing and can recover on the next attempt', async () => {
+  resetState();
+  const source = new Uint8Array([9, 8, 7]);
+  const { body: { photo } } = await uploadFile('retry.mp4', 'video/mp4', source);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+  failDrive9GetPath = photo.objectKey;
+
+  const drained = await drainShareRenditionQueue();
+  assert.equal(drained.retried.length, 1);
+  const preparing = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(preparing.status, 425);
+  assert.equal(preparing.headers.get('retry-after'), '3');
+  assert.notDeepEqual(new Uint8Array(await preparing.arrayBuffer()), source);
+
+  failDrive9GetPath = null;
+  await runShareRenditionJobs([drained.retried[0]], 2);
+  const ready = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(ready.status, 200);
+  assert.deepEqual(new Uint8Array(await ready.arrayBuffer()), SAFE_VIDEO_RENDITION);
 });
 
 test('resharing an existing token migrates it to the bounded public index and privacy-safe rendition', async () => {
