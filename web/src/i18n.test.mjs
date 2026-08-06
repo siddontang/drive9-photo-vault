@@ -18,6 +18,10 @@ test('share preparation feedback is available in both languages', () => {
   for (const lang of ['en', 'zh']) {
     assert.ok(COPY[lang].sharePreparingTitle);
     assert.ok(COPY[lang].sharePreparingBody);
+    assert.ok(COPY[lang].sharePreparingPublic);
+    assert.ok(COPY[lang].sharePreparationTimeout);
+    assert.ok(COPY[lang].sharePreparationFailed);
+    assert.ok(COPY[lang].shareLinkCreated);
     assert.ok(COPY[lang].shareReady);
   }
 });

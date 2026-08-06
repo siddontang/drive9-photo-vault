@@ -53,6 +53,9 @@ let failMediaTransformMode = null;
 let imageTransformCalls = [];
 let imageSourceFetches = [];
 let mediaTransformCalls = [];
+let shareRenditionJobs = [];
+let retriedShareRenditionJobs = [];
+let failShareRenditionQueueSend = false;
 let workerSubrequestCount = 0;
 let workerSubrequestLimit = Infinity;
 let workerDrive9Requests = [];
@@ -244,6 +247,7 @@ globalThis.fetch = async (url, opts = {}) => {
 // Import handler after fetch mock is in place
 const worker = await import('../dist/index.js');
 const handler = worker.default.fetch || worker.default.default?.fetch;
+const queueHandler = worker.default.queue || worker.default.default?.queue;
 
 const imagesBinding = {
   input(stream) {
@@ -318,7 +322,20 @@ const mediaBinding = {
   },
 };
 
-const env = { DRIVE9_API_KEY: 'test-key', DRIVE9_SERVER: 'http://localhost:9999', IMAGES: imagesBinding, MEDIA: mediaBinding };
+const shareRenditionQueue = {
+  async send(body) {
+    if (failShareRenditionQueueSend) throw new Error('queue unavailable');
+    shareRenditionJobs.push(structuredClone(body));
+  },
+};
+
+const env = {
+  DRIVE9_API_KEY: 'test-key',
+  DRIVE9_SERVER: 'http://localhost:9999',
+  IMAGES: imagesBinding,
+  MEDIA: mediaBinding,
+  SHARE_RENDITION_QUEUE: shareRenditionQueue,
+};
 
 function resetState() {
   drive9Store.clear();
@@ -340,12 +357,33 @@ function resetState() {
   imageTransformCalls = [];
   imageSourceFetches = [];
   mediaTransformCalls = [];
+  shareRenditionJobs = [];
+  retriedShareRenditionJobs = [];
+  failShareRenditionQueueSend = false;
   workerSubrequestCount = 0;
   workerSubrequestLimit = Infinity;
   workerDrive9Requests = [];
   imageRenditionBytes = null;
   videoRenditionBytes = SAFE_VIDEO_RENDITION;
   videoPosterBytes = SAFE_VIDEO_POSTER;
+}
+
+async function runShareRenditionJobs(jobs, attempts = 1) {
+  const messages = jobs.map((body, index) => ({
+    id: `share-job-${index}`,
+    timestamp: new Date(),
+    body,
+    attempts,
+    ack() {},
+    retry() { retriedShareRenditionJobs.push(structuredClone(body)); },
+  }));
+  await queueHandler({ queue: 'photovault-share-renditions', messages }, env);
+}
+
+async function drainShareRenditionQueue(attempts = 1) {
+  const jobs = shareRenditionJobs.splice(0);
+  await runShareRenditionJobs(jobs, attempts);
+  return { jobs, retried: [...retriedShareRenditionJobs] };
 }
 
 // The objectKey a POST /api/photos upload maps to on Drive9. The worker stores
@@ -978,7 +1016,7 @@ test('image sharing reports the Images binding 20 MB input limit before fetching
   assert.deepEqual(imageTransformCalls, []);
 });
 
-test('POST /api/photos/:id/share creates metadata-stripped video and poster renditions', async () => {
+test('video sharing queues metadata-stripped renditions and public reads fail closed until ready', async () => {
   resetState();
   const source = new Uint8Array([
     ...new TextEncoder().encode('ftypqt  com.apple.quicktime.location.ISO6709=+31.2304+121.4737/'),
@@ -991,6 +1029,24 @@ test('POST /api/photos/:id/share creates metadata-stripped video and poster rend
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
   assert.equal(create.status, 200);
   const { share } = await create.json();
+  assert.equal(share.status, 'preparing');
+  assert.equal(shareRenditionJobs.length, 1);
+  assert.deepEqual(mediaTransformCalls, [], 'the HTTP request must never run video transformation inline');
+
+  for (const suffix of ['', '/file', '/poster']) {
+    const pending = await handler(new Request(`http://localhost/api/shares/${share.token}${suffix}`), env);
+    assert.equal(pending.status, 425);
+    assert.equal(pending.headers.get('cache-control'), 'no-store');
+    assert.equal(pending.headers.get('retry-after'), '3');
+    const pendingBytes = new Uint8Array(await pending.arrayBuffer());
+    assert.notDeepEqual(pendingBytes, source, `${suffix || 'metadata'} must not return original video bytes while preparing`);
+    assert.equal(containsBytes(pendingBytes, 'com.apple.quicktime.location.ISO6709'), false);
+  }
+  assert.deepEqual(mediaTransformCalls, [], 'public GET must not move inline transformation to the viewer');
+
+  const drained = await drainShareRenditionQueue();
+  assert.equal(drained.jobs.length, 1);
+  assert.deepEqual(drained.retried, []);
 
   const file = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
   assert.equal(file.status, 200);
@@ -1013,6 +1069,122 @@ test('POST /api/photos/:id/share creates metadata-stripped video and poster rend
       output: { mode: 'frame', time: '0s', format: 'jpg' },
     },
   ]);
+
+  const repeated = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).share.status, 'ready');
+  assert.equal(shareRenditionJobs.length, 0, 'a ready queue-owned rendition must not be enqueued again');
+  assert.equal(mediaTransformCalls.length, 2);
+});
+
+test('public video reads with a missing rendition state return 425 without inline transformation', async () => {
+  resetState();
+  const source = new TextEncoder().encode('com.apple.quicktime.location.ISO6709=private');
+  const { body: { photo } } = await uploadFile('stale.mp4', 'video/mp4', source);
+  const token = 'M'.repeat(32);
+  updatePhotoMeta(photo, { shareToken: token, sharedAt: new Date().toISOString() });
+  const index = JSON.parse(gunzipSync(Buffer.from(drive9Store.get('/photovault/index.json.gz'))).toString());
+  index[0].shareToken = token;
+  index[0].sharedAt = new Date().toISOString();
+  drive9Store.set('/photovault/index.json.gz', new Uint8Array(gzipSync(Buffer.from(JSON.stringify(index)))));
+
+  for (const suffix of ['', '/file', '/poster']) {
+    const response = await handler(new Request(`http://localhost/api/shares/${token}${suffix}`), env);
+    assert.equal(response.status, 425);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('retry-after'), '3');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    assert.notDeepEqual(bytes, source);
+    assert.equal(containsBytes(bytes, 'com.apple.quicktime.location.ISO6709'), false);
+  }
+  assert.deepEqual(mediaTransformCalls, []);
+  assert.deepEqual(shareRenditionJobs, []);
+});
+
+test('revoking a queued video share prevents its stale job from publishing', async () => {
+  resetState();
+  const source = new TextEncoder().encode('com.apple.quicktime.location.ISO6709=private');
+  const { body: { photo } } = await uploadFile('revoked.mp4', 'video/mp4', source);
+  const created = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  const { share } = await created.json();
+  assert.equal(shareRenditionJobs.length, 1);
+
+  const revoked = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'DELETE' }), env);
+  assert.equal(revoked.status, 204);
+  await drainShareRenditionQueue();
+
+  assert.equal(mediaTransformCalls.length, 0, 'a stale queued job must be fenced before transformation');
+  assert.equal([...drive9Store.keys()].some((path) => path.includes(photo.id) && path.includes(share.token)), false);
+  const publicFile = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(publicFile.status, 404);
+});
+
+test('regenerating a video share fences the old token job and only the new job can publish', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('regenerated.mp4', 'video/mp4', new Uint8Array([1, 2, 3]));
+  const first = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  const firstShare = (await first.json()).share;
+  const oldJob = shareRenditionJobs.shift();
+
+  const revoked = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'DELETE' }), env);
+  assert.equal(revoked.status, 204);
+  const second = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  const secondShare = (await second.json()).share;
+  const newJob = shareRenditionJobs.shift();
+  assert.notEqual(secondShare.token, firstShare.token);
+
+  await runShareRenditionJobs([oldJob]);
+  assert.equal(mediaTransformCalls.length, 0, 'the old token must be fenced before transformation');
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${firstShare.token}`), env)).status, 404);
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${secondShare.token}`), env)).status, 425);
+
+  shareRenditionJobs.push(newJob);
+  await drainShareRenditionQueue();
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${secondShare.token}/file`), env)).status, 200);
+});
+
+test('replacing the source after enqueue fences stale bytes and a repeated owner action queues the new source', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('replace-source.mp4', 'video/mp4', new Uint8Array([1, 2, 3]));
+  const created = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  const { share } = await created.json();
+  const staleJob = shareRenditionJobs.shift();
+  const replacementPath = `/photovault/photos/${photo.id}-replacement.mp4`;
+  drive9Store.set(replacementPath, new Uint8Array([4, 5, 6]));
+  updatePhotoMeta(photo, { objectKey: replacementPath, checksum: 'replacement-checksum' });
+
+  await runShareRenditionJobs([staleJob]);
+  assert.equal(mediaTransformCalls.length, 0, 'a source checksum change must fence the queued job before transformation');
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${share.token}`), env)).status, 425);
+
+  const retried = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal((await retried.json()).share.status, 'preparing');
+  assert.equal(shareRenditionJobs.length, 1);
+  assert.equal(shareRenditionJobs[0].sourceObjectKey, replacementPath);
+  assert.equal(shareRenditionJobs[0].sourceChecksum, 'replacement-checksum');
+  await drainShareRenditionQueue();
+  assert.equal((await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env)).status, 200);
+});
+
+test('video share creation fails safely when the durable queue binding is unavailable', async () => {
+  resetState();
+  const { body: { photo } } = await uploadFile('queue-missing.mp4', 'video/mp4', new Uint8Array([1, 2, 3]));
+
+  const create = await handler(
+    new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }),
+    { ...env, SHARE_RENDITION_QUEUE: undefined },
+  );
+  assert.equal(create.status, 503);
+  assert.equal((await create.json()).code, 'share_rendition_queue_unavailable');
+  assert.deepEqual(mediaTransformCalls, []);
+  const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
+  assert.match(stored.shareToken, /^[A-Za-z0-9_-]{32}$/);
+  assert.equal(stored.shareRenditionVersion, undefined);
+
+  const retried = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(retried.status, 200);
+  assert.equal((await retried.json()).share.status, 'preparing');
+  assert.equal(shareRenditionJobs.length, 1, 'retrying the owner action must recover a persisted-but-not-enqueued share');
 });
 
 test('share creation fails closed when a privacy-safe rendition cannot be produced', async () => {
@@ -1079,10 +1251,17 @@ test('share creation fails closed if transformed video retains QuickTime locatio
   ]);
 
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
-  assert.equal(create.status, 502);
-  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/')), false);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+  const drained = await drainShareRenditionQueue();
+  assert.equal(drained.retried.length, 0, 'deterministic privacy failures must not be retried');
+  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/') && path.includes(photo.id) && path.endsWith('.mp4')), false);
+  const publicFile = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(publicFile.status, 503);
+  assert.equal((await publicFile.json()).code, 'share_rendition_failed');
   const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
-  assert.equal(stored.shareToken, undefined);
+  assert.equal(stored.shareToken, share.token);
+  assert.equal(stored.shareRenditionVersion, undefined);
 });
 
 test('video share creation removes the completed video when poster transformation fails', async () => {
@@ -1091,11 +1270,49 @@ test('video share creation removes the completed video when poster transformatio
   failMediaTransformMode = 'frame';
 
   const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
-  assert.equal(create.status, 502);
-  assert.equal([...drive9Store.keys()].some((path) => path.includes(photo.id) && path.includes('/share-renditions/')), false);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+  const drained = await drainShareRenditionQueue();
+  assert.equal(drained.retried.length, 1);
+  assert.equal([...drive9Store.keys()].some((path) => path.includes('/share-renditions/') && path.includes(photo.id) && (path.endsWith('.mp4') || path.endsWith('.poster.jpg'))), false);
+  const publicPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(publicPoster.status, 425);
+
+  await runShareRenditionJobs([drained.retried[0]], 5);
+  const finalRetryPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(finalRetryPoster.status, 425);
+
+  await runShareRenditionJobs([drained.retried[0]], 6);
+  const exhaustedPoster = await handler(new Request(`http://localhost/api/shares/${share.token}/poster`), env);
+  assert.equal(exhaustedPoster.status, 503);
+  assert.equal(retriedShareRenditionJobs.length, 3, 'the exhausted delivery must be retried into the configured DLQ');
   const stored = JSON.parse(drive9Store.get(`/photovault/meta/${photo.id}.json`));
-  assert.equal(stored.shareToken, undefined);
+  assert.equal(stored.shareToken, share.token);
   assert.equal(stored.shareRenditionVersion, undefined);
+});
+
+test('a retryable video share failure stays preparing and can recover on the next attempt', async () => {
+  resetState();
+  const source = new Uint8Array([9, 8, 7]);
+  const { body: { photo } } = await uploadFile('retry.mp4', 'video/mp4', source);
+
+  const create = await handler(new Request(`http://localhost/api/photos/${photo.id}/share`, { method: 'POST' }), env);
+  assert.equal(create.status, 200);
+  const { share } = await create.json();
+  failDrive9GetPath = photo.objectKey;
+
+  const drained = await drainShareRenditionQueue();
+  assert.equal(drained.retried.length, 1);
+  const preparing = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(preparing.status, 425);
+  assert.equal(preparing.headers.get('retry-after'), '3');
+  assert.notDeepEqual(new Uint8Array(await preparing.arrayBuffer()), source);
+
+  failDrive9GetPath = null;
+  await runShareRenditionJobs([drained.retried[0]], 2);
+  const ready = await handler(new Request(`http://localhost/api/shares/${share.token}/file`), env);
+  assert.equal(ready.status, 200);
+  assert.deepEqual(new Uint8Array(await ready.arrayBuffer()), SAFE_VIDEO_RENDITION);
 });
 
 test('resharing an existing token migrates it to the bounded public index and privacy-safe rendition', async () => {
